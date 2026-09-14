@@ -1,0 +1,87 @@
+{
+  "rules": {
+    "clubs": {
+      ".read": true,
+      ".indexOn": ["ownerId", "name"],
+      "ahscore": {
+        ".write": true
+      },
+      "$clubId": {
+        ".write": "auth != null"
+      }
+    },
+    "tournaments": {
+      ".read": true,
+      ".indexOn": ["clubId", "year"],
+      "MCL2026": {
+        ".write": true
+      },
+      "$tournamentId": {
+        ".write": "auth != null"
+      }
+    },
+    "teams": {
+      ".read": true,
+      ".indexOn": ["clubId"],
+      "$teamId": {
+        ".write": "auth != null"
+      }
+    },
+    "players": {
+      ".read": true,
+      ".indexOn": ["clubId", "teamId"],
+      "$playerId": {
+        ".write": "auth != null"
+      }
+    },
+    "matches": {
+      ".read": true,
+      ".indexOn": ["clubId", "status", "dateTime"],
+      "$matchId": {
+        ".write": "auth != null"
+      }
+    },
+    "balls": {
+      ".read": true,
+      "$matchId": {
+        ".write": "auth != null"
+      }
+    },
+    "ballIndex": {
+      ".read": "auth != null",
+      "$ballId": {
+        ".write": "auth != null"
+      }
+    },
+    "pointsTable": {
+      ".read": true,
+      ".indexOn": ["tournamentId", "points"],
+      "$entryId": {
+        ".write": "auth != null"
+      }
+    },
+    "users": {
+      ".read": "auth != null",
+      ".indexOn": ["role", "email"],
+      "$uid": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid == $uid",
+        "canGoLive": {
+          ".write": "auth != null && (auth.uid == $uid || root.child('users').child(auth.uid).child('role').val() == 'superadmin')"
+        },
+        "goLiveAccess": {
+          ".write": "auth != null && (auth.uid == $uid || root.child('users').child(auth.uid).child('role').val() == 'superadmin')"
+        },
+        "role": {
+          ".write": "auth != null && (auth.uid == $uid || root.child('users').child(auth.uid).child('role').val() == 'superadmin')"
+        }
+      }
+    },
+    "userDirectory": {
+      ".read": "auth != null",
+      "$uid": {
+        ".write": "auth != null && (auth.uid == $uid || root.child('users').child(auth.uid).child('role').val() == 'superadmin')"
+      }
+    }
+  }
+}

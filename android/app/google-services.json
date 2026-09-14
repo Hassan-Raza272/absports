@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "710552563416",
+    "project_id": "ahscore-31710",
+    "firebase_url": "https://ahscore-31710-default-rtdb.firebaseio.com",
+    "storage_bucket": "ahscore-31710.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:710552563416:android:1e08845602bc90109db1ad",
+        "android_client_info": {
+          "package_name": "com.absscore"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA7qKbfZzauhD9G94cBDjvjNDKhP2QuqZ8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
