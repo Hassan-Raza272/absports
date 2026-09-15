@@ -134,7 +134,7 @@ export default function TeamProfileScreen({ route, navigation }: any) {
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.playerName}>{p.name}</Text>
-                    <Text style={styles.playerRole}>{p.role} • {p.battingStyle.split(' ')[0]}</Text>
+                    <Text style={styles.playerRole}>{p.role}{p.battingStyle ? ` • ${p.battingStyle.split(' ')[0]}` : ''}</Text>
                   </View>
                   <View style={styles.playerMiniStats}>
                     <Text style={styles.playerStatVal}>{p.battingStats?.runs ?? 0}</Text>

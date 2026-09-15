@@ -391,7 +391,7 @@ export default function AdminFixturesScreen({ navigation }: any) {
                   <Text style={styles.matchTeams}>{match.teamAName} vs {match.teamBName}</Text>
                   <Text style={styles.matchMeta}>Match {match.matchNumber} • {match.status}</Text>
                   <Text style={styles.matchDetails}>
-                    📍 {match.venue.split(',')[0]} • 📅 {date.toLocaleDateString()} • 🕐 {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    📍 {(match.venue || 'TBD').split(',')[0]} • 📅 {date.toLocaleDateString()} • 🕐 {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </Text>
                 </View>
                 <View style={styles.actions}>

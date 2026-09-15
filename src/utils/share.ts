@@ -17,7 +17,7 @@ export function matchShareMessage(match: Match, clubName?: string): string {
     '════════════════════',
     `${match.teamAName} vs ${match.teamBName}`,
     match.tournamentId ? `Match ${match.matchNumber}${match.stage ? ` · ${match.stage}` : ''}` : 'Friendly match',
-    `${match.venue} · ${new Date(match.dateTime).toLocaleString()}`,
+    `${match.venue || 'Ground'} · ${match.dateTime ? new Date(match.dateTime).toLocaleString() : ''}`,
     '────────────────────',
   ];
   if (inn1) {

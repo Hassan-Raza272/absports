@@ -34,7 +34,7 @@ export default function FixturesScreen({ navigation }: any) {
       })
       .filter(match => {
         if (!q) return true;
-        return `${match.teamAName} ${match.teamBName} ${match.venue}`.toLowerCase().includes(q);
+        return `${match.teamAName || ''} ${match.teamBName || ''} ${match.venue || ''}`.toLowerCase().includes(q);
       })
       .sort((a, b) => {
         const rank = (s: string) => (s === 'LIVE' ? 0 : s === 'UPCOMING' ? 1 : 2);

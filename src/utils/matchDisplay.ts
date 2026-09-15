@@ -64,7 +64,7 @@ export function liveStatusLine(match: Match) {
   }
   if (match.result && !String(match.result).startsWith('Target:')) return match.result;
   if (match.toss) return `Toss: ${match.toss.winner} chose to ${match.toss.decision}`;
-  return match.status === 'LIVE' ? 'First innings in progress' : match.venue;
+  return match.status === 'LIVE' ? 'First innings in progress' : (match.venue || '');
 }
 
 export function formatMatchWhen(iso: string) {

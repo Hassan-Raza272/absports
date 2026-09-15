@@ -137,7 +137,7 @@ export default function AdminDashboardScreen({ navigation }: any) {
                     <Text style={styles.liveText}>LIVE</Text>
                   </View>
                   <Text style={styles.liveMatchName}>{liveMatch.teamAName} vs {liveMatch.teamBName}</Text>
-                  <Text style={styles.liveMatchSub}>Match {liveMatch.matchNumber} • {liveMatch.venue.split(',')[0]}</Text>
+                  <Text style={styles.liveMatchSub}>Match {liveMatch.matchNumber}{liveMatch.venue ? ` • ${liveMatch.venue.split(',')[0]}` : ''}</Text>
                 </View>
                 <LinearGradient colors={Colors.gradLive} style={styles.liveBtn}>
                   <Text style={styles.liveBtnText}>Score ›</Text>

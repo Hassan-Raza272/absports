@@ -78,7 +78,7 @@ export default function DiscoverScreen({ navigation, route }: any) {
 
   function matchQuery(m: Match) {
     if (!q) return true;
-    return `${m.teamAName} ${m.teamBName} ${m.venue}`.toLowerCase().includes(q);
+    return `${m.teamAName || ''} ${m.teamBName || ''} ${m.venue || ''}`.toLowerCase().includes(q);
   }
 
   const tournamentList = useMemo(() => {
