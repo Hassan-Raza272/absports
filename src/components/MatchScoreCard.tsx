@@ -195,7 +195,7 @@ export default function MatchScoreCard({
           <View style={styles.foot}>
             <View style={styles.footItem}>
               <Icon name="location-outline" size={12} color={Colors.textMuted} />
-              <Text style={styles.meta} numberOfLines={1}>{match.venue.split(',')[0]}</Text>
+              <Text style={styles.meta} numberOfLines={1}>{(match.venue || 'TBD').split(',')[0]}</Text>
             </View>
             <View style={[styles.footItem, styles.footRight]}>
               <Icon name="time-outline" size={12} color={Colors.textMuted} />
