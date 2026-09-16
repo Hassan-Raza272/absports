@@ -61,15 +61,29 @@ export function normalizeRtmpUrl(input: string, platform: StreamPlatform = 'face
 }
 
 export async function requestBroadcastPermissions() {
-  if (Platform.OS !== 'android') return false;
-  const result = await PermissionsAndroid.requestMultiple([
-    PermissionsAndroid.PERMISSIONS.CAMERA,
-    PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-  ]);
-  return (
-    result['android.permission.CAMERA'] === PermissionsAndroid.RESULTS.GRANTED &&
-    result['android.permission.RECORD_AUDIO'] === PermissionsAndroid.RESULTS.GRANTED
-  );
+  if (Platform.OS !== 'android') return true;
+  try {
+    const hasCamera = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.CAMERA);
+    const hasAudio = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+    if (hasCamera && hasAudio) return true;
+
+    const result = await PermissionsAndroid.requestMultiple([
+      PermissionsAndroid.PERMISSIONS.CAMERA,
+      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+    ]);
+
+    const cameraGranted =
+      result['android.permission.CAMERA'] === PermissionsAndroid.RESULTS.GRANTED ||
+      (await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.CAMERA));
+    const audioGranted =
+      result['android.permission.RECORD_AUDIO'] === PermissionsAndroid.RESULTS.GRANTED ||
+      (await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO));
+
+    return cameraGranted && audioGranted;
+  } catch (err) {
+    console.warn('requestBroadcastPermissions error:', err);
+    return false;
+  }
 }
 
 export async function startPreview() {

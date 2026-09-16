@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View, ViewStyle } from 'react-native';
+import React, { useEffect, useMemo, useRef } from 'react';
+import { Animated, Easing, StyleSheet, Text, TouchableOpacity, View, ViewStyle } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
@@ -45,6 +45,115 @@ function shortLabel(name?: string) {
   const parts = clean.split(/\s+/);
   if (parts.length === 1) return clean.slice(0, 10);
   return parts.map(p => p[0]).join('').slice(0, 4).toUpperCase() || clean.slice(0, 8);
+}
+
+/** Animated LIVE badge: pulsing dot + expanding ripple ring + gentle badge opacity breathe. */
+function AnimatedLiveBadge({ color, label }: { color: string; label: string }) {
+  // Dot scale — breathes between 0.7 and 1.3
+  const dotScale = useRef(new Animated.Value(1)).current;
+  // Ring — expands from scale 0.5 → 1.8 while fading from 1 → 0
+  const ringScale = useRef(new Animated.Value(0.5)).current;
+  const ringOpacity = useRef(new Animated.Value(1)).current;
+  // Badge opacity — subtle breathe between 0.75 and 1
+  const badgeOpacity = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    // Dot pulse — repeating scale breathe
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(dotScale, {
+          toValue: 1.4,
+          duration: 600,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(dotScale, {
+          toValue: 0.7,
+          duration: 600,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+    ).start();
+
+    // Ripple ring — expand and fade, repeat
+    const runRipple = () => {
+      ringScale.setValue(0.4);
+      ringOpacity.setValue(0.9);
+      Animated.parallel([
+        Animated.timing(ringScale, {
+          toValue: 2.2,
+          duration: 1200,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(ringOpacity, {
+          toValue: 0,
+          duration: 1200,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        setTimeout(runRipple, 300);
+      });
+    };
+    runRipple();
+
+    // Badge breathe
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(badgeOpacity, {
+          toValue: 0.78,
+          duration: 900,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(badgeOpacity, {
+          toValue: 1,
+          duration: 900,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+    ).start();
+  }, []);
+
+  return (
+    <Animated.View
+      style={[
+        styles.badge,
+        {
+          backgroundColor: color + '22',
+          borderColor: color + '66',
+          opacity: badgeOpacity,
+        },
+      ]}>
+      {/* Ripple ring */}
+      <View style={styles.liveDotWrap}>
+        <Animated.View
+          style={[
+            styles.liveRing,
+            {
+              transform: [{ scale: ringScale }],
+              opacity: ringOpacity,
+              borderColor: color,
+            },
+          ]}
+        />
+        {/* Pulsing solid dot */}
+        <Animated.View
+          style={[
+            styles.liveDot,
+            {
+              backgroundColor: color,
+              transform: [{ scale: dotScale }],
+            },
+          ]}
+        />
+      </View>
+      <Text style={[styles.badgeText, { color }]}>{label}</Text>
+    </Animated.View>
+  );
 }
 
 export default function MatchScoreCard({
@@ -98,10 +207,13 @@ export default function MatchScoreCard({
           ]}>
           <View style={styles.top}>
             <View style={styles.badges}>
-              <View style={[styles.badge, { backgroundColor: status.color + '18', borderColor: status.color + '55' }]}>
-                {isLive && <View style={styles.liveDot} />}
-                <Text style={[styles.badgeText, { color: status.color }]}>{status.label}</Text>
-              </View>
+              {isLive ? (
+                <AnimatedLiveBadge color={status.color} label={status.label} />
+              ) : (
+                <View style={[styles.badge, { backgroundColor: status.color + '18', borderColor: status.color + '55' }]}>
+                  <Text style={[styles.badgeText, { color: status.color }]}>{status.label}</Text>
+                </View>
+              )}
               <View style={[styles.badge, styles.kindBadge]}>
                 <Text style={styles.kind}>{isFriendly(match) ? 'FRIENDLY' : matchKindLabel(match)}</Text>
               </View>
@@ -258,7 +370,14 @@ const styles = StyleSheet.create({
     borderColor: Colors.border,
   },
   badgeText: { fontSize: 10, fontWeight: '900', letterSpacing: 0.8 },
+  liveDotWrap: {
+    width: 14,
+    height: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: Colors.live },
+  liveRing: { position: 'absolute', width: 12, height: 12, borderRadius: 6, borderWidth: 1.5, borderColor: Colors.live },
   kind: { fontSize: 10, fontWeight: '800', color: Colors.textSecondary, letterSpacing: 0.5 },
   topActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   iconBtn: {

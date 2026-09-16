@@ -4,9 +4,9 @@ import BackButton from '../../../components/BackButton';
 import { showAlert } from '../../../components/PremiumAlert';
 import LinearGradient from 'react-native-linear-gradient';
 import { Colors, Typography, Spacing, Radius } from '../../../theme';
-import { useTeamsStore, usePlayersStore, useMatchesStore, useAuthStore, useScopeLabels, useScopedMatches } from '../../../store';
+import { useTeamsStore, usePlayersStore, useMatchesStore, useAuthStore, useScopeLabels, useScopedMatches, useClubsStore } from '../../../store';
 import { Match } from '../../../types';
-import { isSuperAdmin } from '../../../utils/account';
+import { isSuperAdmin, isUsersOwnMatch } from '../../../utils/account';
 import { EaseEnter, EasePress, EaseScreen } from '../../../motion';
 import { SkeletonGrid } from '../../../components/Skeleton';
 
@@ -49,6 +49,7 @@ export default function AdminDashboardScreen({ navigation }: any) {
   const liveMatch = matches.find(m => m.status === 'LIVE') || null;
   const { subtitle } = useScopeLabels();
   const user = useAuthStore(state => state.user);
+  const clubs = useClubsStore(state => state.clubs);
   const [showMatchPicker, setShowMatchPicker] = useState(false);
 
   useEffect(() => {
@@ -58,8 +59,9 @@ export default function AdminDashboardScreen({ navigation }: any) {
     }
   }, [user, navigation]);
 
-  const completedMatches = matches.filter(m => m.status === 'COMPLETED').length;
-  const scorableMatches = matches
+  const userMatches = matches.filter(m => isUsersOwnMatch(user, m, clubs));
+  const completedMatches = userMatches.filter(m => m.status === 'COMPLETED').length;
+  const scorableMatches = userMatches
     .filter(m => m.status === 'UPCOMING' || m.status === 'LIVE')
     .sort((a, b) => {
       if (a.status === 'LIVE' && b.status !== 'LIVE') return -1;

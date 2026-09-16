@@ -367,7 +367,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   stage: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -435,7 +435,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.28)',
   },
   chevronWrap: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     overflow: 'hidden',
     paddingTop: 4,
   },
@@ -451,7 +451,7 @@ const styles = StyleSheet.create({
     borderRightColor: 'transparent',
   },
   burst: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -522,7 +522,7 @@ const styles = StyleSheet.create({
     borderRadius: 120,
     opacity: 0.88,
   },
-  paintRows: { ...StyleSheet.absoluteFillObject },
+  paintRows: { ...StyleSheet.absoluteFill },
   paintStroke: {
     position: 'absolute',
     left: -20,

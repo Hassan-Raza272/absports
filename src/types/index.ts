@@ -26,6 +26,7 @@ export interface GoLiveAccess {
 export interface Team {
   id: string;
   clubId: string;
+  createdBy?: string;
   name: string;
   shortName: string;
   logoURL?: string;

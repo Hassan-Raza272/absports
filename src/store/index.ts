@@ -86,9 +86,7 @@ export async function hydrateScopeFromStorage() {
 
 function matchInTournamentScope(match: Match, tournamentId: string | null): boolean {
   if (!tournamentId || tournamentId === ALL_TOURNAMENTS_ID) return true;
-  // Live games stay visible in the club even if another tournament is selected.
-  if (match.status === 'LIVE') return true;
-  return !match.tournamentId || match.tournamentId === tournamentId;
+  return match.tournamentId === tournamentId;
 }
 
 /** Matches visible for the selected club + tournament. Friendlies and live always stay visible. */
