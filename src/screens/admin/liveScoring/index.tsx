@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, StatusBar, TextInput, Modal, useWindowDimensions, InteractionManager } from 'react-native';
+import { Animated, Easing, View, Text, StyleSheet, ScrollView, TouchableOpacity, StatusBar, TextInput, Modal, useWindowDimensions, InteractionManager } from 'react-native';
 import BackButton from '../../../components/BackButton';
 import { showAlert } from '../../../components/PremiumAlert';
 import LinearGradient from 'react-native-linear-gradient';
@@ -43,8 +43,9 @@ import { buildOverlayModel, overlayModelFromMatch } from '../../../components/Sc
 import { useOverlayModeStore } from '../../../store/overlayMode';
 import { speakText, stopSpeaking } from '../../../utils/voice';
 import { isRtmpStreaming, stopStream, subscribeRtmpStatus } from '../../../native/rtmpStream';
-import { canUserGoLiveOnMatch, goLiveDeniedMessage } from '../../../utils/account';
+import { canUserGoLiveOnMatch, goLiveDeniedMessage, isUsersOwnMatch } from '../../../utils/account';
 import TeamLogoAvatar from '../../../components/TeamLogoAvatar';
+import PremiumGoLiveModal from '../../../components/PremiumGoLiveModal';
 
 type ExtraType = 'wide' | 'noBall' | 'bye' | 'legBye' | null;
 type DismissalType = 'Bowled' | 'Caught' | 'LBW' | 'Run Out' | 'Stumped' | 'Hit Wicket' | 'Retired Hurt' | null;
@@ -74,6 +75,109 @@ function ensureArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) return value as T[];
   if (value && typeof value === 'object') return Object.values(value as Record<string, T>);
   return [];
+}
+
+/** Animated GO LIVE button: pulsing dot + expanding radar ripple ring + gentle breathe opacity. */
+function AnimatedGoLiveButton({ onAir, onPress }: { onAir: boolean; onPress: () => void }) {
+  const dotScale = useRef(new Animated.Value(1)).current;
+  const ringScale = useRef(new Animated.Value(0.4)).current;
+  const ringOpacity = useRef(new Animated.Value(1)).current;
+  const pillOpacity = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(dotScale, {
+          toValue: 1.4,
+          duration: 600,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(dotScale, {
+          toValue: 0.7,
+          duration: 600,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+    ).start();
+
+    const runRipple = () => {
+      ringScale.setValue(0.4);
+      ringOpacity.setValue(0.9);
+      Animated.parallel([
+        Animated.timing(ringScale, {
+          toValue: 2.2,
+          duration: 1200,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(ringOpacity, {
+          toValue: 0,
+          duration: 1200,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        setTimeout(runRipple, 300);
+      });
+    };
+    runRipple();
+
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pillOpacity, {
+          toValue: 0.8,
+          duration: 800,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pillOpacity, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+    ).start();
+  }, [dotScale, ringScale, ringOpacity, pillOpacity]);
+
+  const color = onAir ? Colors.live : '#FFD700';
+
+  return (
+    <TouchableOpacity onPress={onPress} activeOpacity={0.85}>
+      <Animated.View
+        style={[
+          onAir ? styles.onAirPill : styles.overlayPill,
+          { opacity: pillOpacity, flexDirection: 'row', alignItems: 'center', gap: 6 },
+        ]}>
+        <View style={styles.liveDotWrap}>
+          <Animated.View
+            style={[
+              styles.liveRing,
+              {
+                transform: [{ scale: ringScale }],
+                opacity: ringOpacity,
+                borderColor: color,
+              },
+            ]}
+          />
+          <Animated.View
+            style={[
+              styles.liveDot,
+              {
+                backgroundColor: color,
+                transform: [{ scale: dotScale }],
+              },
+            ]}
+          />
+        </View>
+        <Text style={onAir ? styles.onAirLabel : styles.overlayLabel}>
+          {onAir ? 'ON AIR' : 'GO LIVE'}
+        </Text>
+      </Animated.View>
+    </TouchableOpacity>
+  );
 }
 
 export default function AdminLiveScoringScreen({ route, navigation }: any) {
@@ -112,8 +216,15 @@ export default function AdminLiveScoringScreen({ route, navigation }: any) {
       showAlert('Match finished', 'This match is already completed. Scoring is closed.', [
         { text: 'OK', onPress: () => navigation.goBack() },
       ]);
+      return;
     }
-  }, [match?.id, match?.status, navigation]);
+    if (user && !isUsersOwnMatch(user, match, clubs)) {
+      showAlert('Access Restricted', 'You can only score matches that you created.', [
+        { text: 'OK', onPress: () => navigation.goBack() },
+      ]);
+      return;
+    }
+  }, [match?.id, match?.status, user, clubs, navigation]);
 
   // First scorer to open the desk owns Go Live for this match when createdBy was never set.
   useEffect(() => {
@@ -182,23 +293,21 @@ export default function AdminLiveScoringScreen({ route, navigation }: any) {
     );
   }
 
+  const [showGoLivePremiumModal, setShowGoLivePremiumModal] = useState(false);
+
   function openBroadcast() {
     if (!canUserGoLiveOnMatch(user, match, clubs)) {
-      showAlert('No Go Live access', goLiveDeniedMessage(user, match, clubs));
+      setShowGoLivePremiumModal(true);
       return;
     }
     navigation.navigate('AdminBroadcast', { matchId });
   }
 
   function renderGoLiveBtn() {
-    if (!canUserGoLiveOnMatch(user, match, clubs) && !onAir) {
+    if (!isUsersOwnMatch(user, match, clubs) && !onAir) {
       return <View style={{ width: 72 }} />;
     }
-    return (
-      <TouchableOpacity onPress={openBroadcast} style={onAir ? styles.onAirPill : styles.overlayPill}>
-        <Text style={onAir ? styles.onAirLabel : styles.overlayLabel}>{onAir ? 'ON AIR' : 'GO LIVE'}</Text>
-      </TouchableOpacity>
-    );
+    return <AnimatedGoLiveButton onAir={onAir} onPress={openBroadcast} />;
   }
 
   const [inningsNumber, setInningsNumber] = useState<1 | 2>(match?.currentInnings || 1);
@@ -2921,6 +3030,11 @@ export default function AdminLiveScoringScreen({ route, navigation }: any) {
           </ScrollView>
         </View>
       </Modal>
+
+      <PremiumGoLiveModal
+        visible={showGoLivePremiumModal}
+        onClose={() => setShowGoLivePremiumModal(false)}
+      />
     </View>
   );
 }
@@ -2974,7 +3088,14 @@ const styles = StyleSheet.create({
     borderColor: Colors.onPrimary,
   },
   onAirLabel: { fontSize: Typography.xs, fontWeight: '800', color: Colors.live },
+  liveDotWrap: {
+    width: 14,
+    height: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: Colors.onPrimary },
+  liveRing: { position: 'absolute', width: 12, height: 12, borderRadius: 6, borderWidth: 1.5, borderColor: Colors.onPrimary },
   liveLabel: { fontSize: Typography.xs, fontWeight: '800', color: Colors.onPrimary },
   overlayModeBar: {
     paddingHorizontal: Spacing.base,

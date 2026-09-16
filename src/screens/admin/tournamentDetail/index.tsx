@@ -23,6 +23,8 @@ import { pointsTableShareMessage, shareText } from '../../../utils/share';
 import { randomPremiumTeamLogo } from '../../../utils/defaultLogo';
 import TournamentBanner from '../../../components/TournamentBanner';
 import PremiumPointsTable from '../../../components/PremiumPointsTable';
+import PremiumGoLiveModal from '../../../components/PremiumGoLiveModal';
+import { canUserGoLiveOnMatch, isUsersOwnMatch } from '../../../utils/account';
 
 type Tab = 'overview' | 'teams' | 'fixtures' | 'table';
 
@@ -159,13 +161,17 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
     if (requestedTab && TABS.some(t => t.key === requestedTab)) setTab(requestedTab);
   }, [requestedTab]);
 
-  if (!user) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.empty}>Sign in required.</Text>
-      </View>
-    );
-  }
+  const [showGoLivePremiumModal, setShowGoLivePremiumModal] = useState(false);
+
+  const handleGoLive = (match: Match) => {
+    if (canUserGoLiveOnMatch(user, match)) {
+      navigation.navigate('AdminBroadcast', { matchId: match.id });
+    } else {
+      setShowGoLivePremiumModal(true);
+    }
+  };
+
+  const isOwner = !!user && (tournament?.createdBy === user.id || user.role === 'superadmin' || user.role === 'admin' || user.currentClubId === tournament?.clubId);
 
   if (!tournament) {
     return (
@@ -214,6 +220,7 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
       const logoURL = randomPremiumTeamLogo(`${newTeamName.trim()}-${shortName}`);
       const payload: Omit<Team, 'id'> = {
         clubId: t.clubId,
+        createdBy: user?.id,
         name: newTeamName.trim(),
         shortName,
         captain: 'TBD',
@@ -509,25 +516,34 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
 
         {currentTab === 'teams' && (
           <View style={styles.card}>
-            <Text style={styles.section}>Add a team</Text>
-            <Text style={styles.hint}>Create a squad and enroll it in this tournament.</Text>
-            <TextInput style={styles.input} placeholder="Team name *" placeholderTextColor={Colors.textMuted} value={newTeamName} onChangeText={setNewTeamName} />
-            <TextInput style={styles.input} placeholder="Short name * (e.g. LIO)" placeholderTextColor={Colors.textMuted} value={newTeamShort} onChangeText={setNewTeamShort} autoCapitalize="characters" />
-            <TouchableOpacity disabled={addingTeam || saving} onPress={createAndEnrollTeam} style={{ marginBottom: Spacing.lg }}>
-              <LinearGradient colors={Colors.gradGold} style={styles.primaryBtn}>
-                <Text style={styles.primaryBtnText}>{addingTeam ? 'Adding…' : 'Add team to tournament'}</Text>
-              </LinearGradient>
-            </TouchableOpacity>
+            {isOwner && (
+              <>
+                <Text style={styles.section}>Add a team</Text>
+                <Text style={styles.hint}>Create a squad and enroll it in this tournament.</Text>
+                <TextInput style={styles.input} placeholder="Team name *" placeholderTextColor={Colors.textMuted} value={newTeamName} onChangeText={setNewTeamName} />
+                <TextInput style={styles.input} placeholder="Short name * (e.g. LIO)" placeholderTextColor={Colors.textMuted} value={newTeamShort} onChangeText={setNewTeamShort} autoCapitalize="characters" />
+                <TouchableOpacity disabled={addingTeam || saving} onPress={createAndEnrollTeam} style={{ marginBottom: Spacing.lg }}>
+                  <LinearGradient colors={Colors.gradGold} style={styles.primaryBtn}>
+                    <Text style={styles.primaryBtnText}>{addingTeam ? 'Adding…' : 'Add team to tournament'}</Text>
+                  </LinearGradient>
+                </TouchableOpacity>
+              </>
+            )}
 
             <Text style={styles.section}>Enrolled squads ({enrolledIds.length})</Text>
-            <Text style={styles.hint}>Tap a club team to enroll or remove it.</Text>
+            {isOwner && <Text style={styles.hint}>Tap a club team to enroll or remove it.</Text>}
             {clubTeams.length === 0 && (
-              <Text style={styles.empty}>No teams yet — add one above.</Text>
+              <Text style={styles.empty}>No enrolled teams yet.</Text>
             )}
             {clubTeams.map(team => {
               const on = enrolledIds.includes(team.id);
+              if (!isOwner && !on) return null;
               return (
-                <TouchableOpacity key={team.id} onPress={() => toggleEnroll(team.id)} style={[styles.teamRow, on && styles.teamRowOn]}>
+                <TouchableOpacity
+                  key={team.id}
+                  disabled={!isOwner}
+                  onPress={() => toggleEnroll(team.id)}
+                  style={[styles.teamRow, on && styles.teamRowOn]}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.teamName}>{team.name}</Text>
                     <Text style={styles.meta}>{team.shortName}</Text>
@@ -541,84 +557,88 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
 
         {currentTab === 'fixtures' && (
           <View>
-            <View style={styles.card}>
-              <Text style={styles.section}>Auto schedule</Text>
-              <Text style={styles.hint}>Build a full round-robin between enrolled teams.</Text>
-              <TouchableOpacity onPress={() => setHomeAndAway(v => !v)} style={[styles.chip, homeAndAway && styles.chipOn, { alignSelf: 'flex-start', marginBottom: Spacing.sm }]}>
-                <Text style={[styles.chipText, homeAndAway && styles.chipTextOn]}>Home & away (2 legs)</Text>
-              </TouchableOpacity>
-              <Text style={styles.label}>Hours between kickoffs</Text>
-              <TextInput style={styles.input} keyboardType="number-pad" value={hoursApart} onChangeText={setHoursApart} />
-              <TouchableOpacity onPress={generateRoundRobin} style={{ marginTop: Spacing.sm }}>
-                <LinearGradient colors={Colors.gradPrimary} style={styles.primaryBtn}>
-                  <Text style={styles.primaryBtnText}>Generate round-robin</Text>
-                </LinearGradient>
-              </TouchableOpacity>
-            </View>
+            {isOwner && (
+              <>
+                <View style={styles.card}>
+                  <Text style={styles.section}>Auto schedule</Text>
+                  <Text style={styles.hint}>Build a full round-robin between enrolled teams.</Text>
+                  <TouchableOpacity onPress={() => setHomeAndAway(v => !v)} style={[styles.chip, homeAndAway && styles.chipOn, { alignSelf: 'flex-start', marginBottom: Spacing.sm }]}>
+                    <Text style={[styles.chipText, homeAndAway && styles.chipTextOn]}>Home & away (2 legs)</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.label}>Hours between kickoffs</Text>
+                  <TextInput style={styles.input} keyboardType="number-pad" value={hoursApart} onChangeText={setHoursApart} />
+                  <TouchableOpacity onPress={generateRoundRobin} style={{ marginTop: Spacing.sm }}>
+                    <LinearGradient colors={Colors.gradPrimary} style={styles.primaryBtn}>
+                      <Text style={styles.primaryBtnText}>Generate round-robin</Text>
+                    </LinearGradient>
+                  </TouchableOpacity>
+                </View>
 
-            <TouchableOpacity
-              onPress={() => {
-                setAddingFixture(v => !v);
-                setEditingId(null);
-                setFixtureForm(f => {
-                  const defaultA = enrolledTeams[0]?.id || clubTeams[0]?.id || '';
-                  const defaultB = enrolledTeams[1]?.id
-                    || clubTeams.find(c => c.id !== defaultA)?.id
-                    || '';
-                  return {
-                    ...f,
-                    venue: t.venue,
-                    overs: String(t.overs),
-                    teamAId: defaultA,
-                    teamBId: defaultB,
-                  };
-                });
-              }}
-              style={styles.addBtn}>
-              <Text style={styles.addBtnText}>{addingFixture ? 'Cancel' : '+ Schedule match'}</Text>
-            </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => {
+                    setAddingFixture(v => !v);
+                    setEditingId(null);
+                    setFixtureForm(f => {
+                      const defaultA = enrolledTeams[0]?.id || clubTeams[0]?.id || '';
+                      const defaultB = enrolledTeams[1]?.id
+                        || clubTeams.find(c => c.id !== defaultA)?.id
+                        || '';
+                      return {
+                        ...f,
+                        venue: t.venue,
+                        overs: String(t.overs),
+                        teamAId: defaultA,
+                        teamBId: defaultB,
+                      };
+                    });
+                  }}
+                  style={styles.addBtn}>
+                  <Text style={styles.addBtnText}>{addingFixture ? 'Cancel' : '+ Schedule match'}</Text>
+                </TouchableOpacity>
 
-            {addingFixture && (
-              <View style={styles.card}>
-                <Text style={styles.section}>{editingId ? 'Edit fixture' : 'New fixture'}</Text>
-                <Text style={styles.label}>Team A</Text>
-                <TeamPicker
-                  teams={fixtureTeamOptions}
-                  enrolledIds={enrolledIds}
-                  selectedId={fixtureForm.teamAId}
-                  onSelect={id => setFixtureForm(f => ({ ...f, teamAId: id }))}
-                  onCreateTeam={() => setTab('teams')}
-                />
-                <Text style={styles.label}>Team B</Text>
-                <TeamPicker
-                  teams={fixtureTeamOptions}
-                  enrolledIds={enrolledIds}
-                  selectedId={fixtureForm.teamBId}
-                  onSelect={id => setFixtureForm(f => ({ ...f, teamBId: id }))}
-                  onCreateTeam={() => setTab('teams')}
-                />
-                <Text style={styles.label}>Date</Text>
-                <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowDatePicker(true)}>
-                  <Text style={styles.pickerText}>{dateLabel}</Text>
-                </TouchableOpacity>
-                {showDatePicker && (
-                  <DateTimePicker value={scheduledAt} mode="date" display={Platform.OS === 'ios' ? 'spinner' : 'default'} minimumDate={new Date()} onChange={onDateChange} themeVariant="light" />
+                {addingFixture && (
+                  <View style={styles.card}>
+                    <Text style={styles.section}>{editingId ? 'Edit fixture' : 'New fixture'}</Text>
+                    <Text style={styles.label}>Team A</Text>
+                    <TeamPicker
+                      teams={fixtureTeamOptions}
+                      enrolledIds={enrolledIds}
+                      selectedId={fixtureForm.teamAId}
+                      onSelect={id => setFixtureForm(f => ({ ...f, teamAId: id }))}
+                      onCreateTeam={() => setTab('teams')}
+                    />
+                    <Text style={styles.label}>Team B</Text>
+                    <TeamPicker
+                      teams={fixtureTeamOptions}
+                      enrolledIds={enrolledIds}
+                      selectedId={fixtureForm.teamBId}
+                      onSelect={id => setFixtureForm(f => ({ ...f, teamBId: id }))}
+                      onCreateTeam={() => setTab('teams')}
+                    />
+                    <Text style={styles.label}>Date</Text>
+                    <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowDatePicker(true)}>
+                      <Text style={styles.pickerText}>{dateLabel}</Text>
+                    </TouchableOpacity>
+                    {showDatePicker && (
+                      <DateTimePicker value={scheduledAt} mode="date" display={Platform.OS === 'ios' ? 'spinner' : 'default'} minimumDate={new Date()} onChange={onDateChange} themeVariant="light" />
+                    )}
+                    <Text style={styles.label}>Time</Text>
+                    <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowTimePicker(true)}>
+                      <Text style={styles.pickerText}>{timeLabel}</Text>
+                    </TouchableOpacity>
+                    {showTimePicker && (
+                      <DateTimePicker value={scheduledAt} mode="time" display={Platform.OS === 'ios' ? 'spinner' : 'default'} onChange={onTimeChange} themeVariant="light" />
+                    )}
+                    <TextInput style={styles.input} value={fixtureForm.venue} onChangeText={venue => setFixtureForm(f => ({ ...f, venue }))} placeholder="Venue" placeholderTextColor={Colors.textMuted} />
+                    <TextInput style={styles.input} value={fixtureForm.overs} onChangeText={overs => setFixtureForm(f => ({ ...f, overs }))} keyboardType="number-pad" placeholder="Overs" placeholderTextColor={Colors.textMuted} />
+                    <TouchableOpacity onPress={submitFixture} style={{ marginTop: Spacing.md }}>
+                      <LinearGradient colors={Colors.gradPrimary} style={styles.primaryBtn}>
+                        <Text style={styles.primaryBtnText}>{editingId ? 'Update fixture' : 'Save fixture'}</Text>
+                      </LinearGradient>
+                    </TouchableOpacity>
+                  </View>
                 )}
-                <Text style={styles.label}>Time</Text>
-                <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowTimePicker(true)}>
-                  <Text style={styles.pickerText}>{timeLabel}</Text>
-                </TouchableOpacity>
-                {showTimePicker && (
-                  <DateTimePicker value={scheduledAt} mode="time" display={Platform.OS === 'ios' ? 'spinner' : 'default'} onChange={onTimeChange} themeVariant="light" />
-                )}
-                <TextInput style={styles.input} value={fixtureForm.venue} onChangeText={venue => setFixtureForm(f => ({ ...f, venue }))} placeholder="Venue" placeholderTextColor={Colors.textMuted} />
-                <TextInput style={styles.input} value={fixtureForm.overs} onChangeText={overs => setFixtureForm(f => ({ ...f, overs }))} keyboardType="number-pad" placeholder="Overs" placeholderTextColor={Colors.textMuted} />
-                <TouchableOpacity onPress={submitFixture} style={{ marginTop: Spacing.md }}>
-                  <LinearGradient colors={Colors.gradPrimary} style={styles.primaryBtn}>
-                    <Text style={styles.primaryBtnText}>{editingId ? 'Update fixture' : 'Save fixture'}</Text>
-                  </LinearGradient>
-                </TouchableOpacity>
-              </View>
+              </>
             )}
 
             {tourneyMatches.map(match => (
@@ -630,20 +650,33 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
                 <Text style={styles.meta}>{match.venue} · {match.overs} ov</Text>
                 {match.result ? <Text style={styles.result}>{match.result}</Text> : null}
                 <View style={styles.matchActions}>
-                  {(match.status === 'UPCOMING' || match.status === 'LIVE') && (
+                  {isOwner && (match.status === 'UPCOMING' || match.status === 'LIVE') && (
                     <TouchableOpacity onPress={() => navigation.navigate('AdminLiveScoring', { matchId: match.id })}>
                       <Text style={styles.link}>Score</Text>
+                    </TouchableOpacity>
+                  )}
+                  {isUsersOwnMatch(user, match) && (match.status === 'UPCOMING' || match.status === 'LIVE') && (
+                    <TouchableOpacity onPress={() => handleGoLive(match)}>
+                      <Text style={[styles.link, { color: Colors.live }]}>Go Live</Text>
                     </TouchableOpacity>
                   )}
                   <TouchableOpacity onPress={() => navigation.navigate('MatchCenter', { matchId: match.id })}>
                     <Text style={styles.link}>View</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity onPress={() => editFixture(match)}><Text style={styles.link}>Edit</Text></TouchableOpacity>
-                  <TouchableOpacity onPress={() => deleteFixture(match.id)}><Text style={[styles.link, { color: Colors.loss }]}>Delete</Text></TouchableOpacity>
+                  {isOwner && (
+                    <>
+                      <TouchableOpacity onPress={() => editFixture(match)}><Text style={styles.link}>Edit</Text></TouchableOpacity>
+                      <TouchableOpacity onPress={() => deleteFixture(match.id)}><Text style={[styles.link, { color: Colors.loss }]}>Delete</Text></TouchableOpacity>
+                    </>
+                  )}
                 </View>
               </LinearGradient>
             ))}
-            {tourneyMatches.length === 0 && <Text style={styles.empty}>No fixtures yet. Auto-schedule or add a match.</Text>}
+            {tourneyMatches.length === 0 && (
+              <Text style={styles.empty}>
+                {isOwner ? 'No fixtures yet. Auto-schedule or add a match.' : 'No fixtures scheduled yet for this tournament.'}
+              </Text>
+            )}
           </View>
         )}
 
@@ -658,6 +691,11 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
           />
         )}
       </ScrollView>
+
+      <PremiumGoLiveModal
+        visible={showGoLivePremiumModal}
+        onClose={() => setShowGoLivePremiumModal(false)}
+      />
     </View>
   );
 }

@@ -66,7 +66,7 @@ export default function AccountDrawer(props: DrawerContentComponentProps) {
     }
     if (!item.route) return;
     navigation.closeDrawer();
-    navigation.getParent()?.navigate(item.route as never, (item.params || undefined) as never);
+    (navigation.getParent() as any)?.navigate(item.route, item.params);
   }
 
   function handleSignOut() {
