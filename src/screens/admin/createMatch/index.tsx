@@ -331,6 +331,7 @@ export default function CreateMatchScreen({ navigation }: any) {
 
       const payload: Omit<Team, 'id'> = {
         clubId,
+        createdBy: user?.id,
         name: newTeamName.trim(),
         shortName,
         captain: captainName,

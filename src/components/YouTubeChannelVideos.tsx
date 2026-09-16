@@ -623,6 +623,7 @@ function VideoPlayerModal({ video, onClose }: { video: ChannelVideo | null; onCl
   if (!video) return null;
 
   async function openInYouTubeApp() {
+    if (!video) return;
     const appUrl = youtubeAppUrl(video.id);
     const webUrl = video.isLive ? youtubeLiveUrl(video.id) : youtubeWatchUrl(video.id);
     try {

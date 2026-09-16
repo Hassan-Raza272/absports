@@ -174,7 +174,7 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   container: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   vignette: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'transparent',
   },
   ambientGlow: {
@@ -200,7 +200,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   ringSlot: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
   },
