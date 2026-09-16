@@ -1,19 +1,49 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { Colors, Radius, Spacing, Typography } from '../../theme';
 import ScreenScaffold from '../../components/ScreenScaffold';
 import EmptyState from '../../components/EmptyState';
-import { useAuthStore, useClubsStore, useHubStore, useScopeStore, useUserClubs } from '../../store';
+import { useAuthStore, useClubsStore, useHubStore, useScopeStore, useTeamsStore } from '../../store';
+import { listenUserTeams } from '../../firebase';
+import { isUsersOwnTeam } from '../../utils/account';
+import { Team } from '../../types';
+
+function uniqueTeams(rows: Team[]): Team[] {
+  const seen = new Set<string>();
+  return rows.filter(t => {
+    if (!t?.id || seen.has(t.id)) return false;
+    seen.add(t.id);
+    return true;
+  });
+}
 
 export default function MyTeamsScreen({ navigation }: any) {
   const user = useAuthStore(s => s.user);
-  const myClubs = useUserClubs();
   const clubs = useClubsStore(s => s.clubs);
-  const teams = useHubStore(s => s.teams);
+  const localTeams = useTeamsStore(s => s.teams);
+  const hubTeams = useHubStore(s => s.teams);
   const selectClub = useScopeStore(s => s.selectClub);
-  const ids = new Set(myClubs.map(c => c.id));
-  const mine = teams.filter(t => ids.has(t.clubId) || t.id === user?.teamId);
+  const [userTeams, setUserTeams] = useState<Team[]>([]);
+
+  useEffect(() => {
+    if (!user?.id) {
+      setUserTeams([]);
+      return;
+    }
+    const unsub = listenUserTeams(user.id, teams => {
+      setUserTeams(teams);
+    });
+    return () => {
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [user?.id]);
+
+  const mine = useMemo(() => {
+    if (!user) return [];
+    const merged = uniqueTeams([...userTeams, ...localTeams, ...hubTeams]);
+    return merged.filter(t => isUsersOwnTeam(user, t, clubs));
+  }, [user, userTeams, localTeams, hubTeams, clubs]);
 
   if (!user) {
     return (

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Colors, Radius, Spacing, Typography } from '../../theme';
 import ScreenScaffold from '../../components/ScreenScaffold';
@@ -13,10 +13,10 @@ import {
   useHubStore,
   useMatchesStore,
   usePublicFeedStore,
-  useScopeStore,
-  useUserClubs,
 } from '../../store';
-import { deleteMatch as deleteRemoteMatch } from '../../firebase';
+import { deleteMatch as deleteRemoteMatch, listenUserMatches } from '../../firebase';
+import { canUserGoLiveOnMatch, isUsersOwnMatch } from '../../utils/account';
+import PremiumGoLiveModal from '../../components/PremiumGoLiveModal';
 import { Match } from '../../types';
 
 type Filter = 'all' | 'UPCOMING' | 'LIVE' | 'COMPLETED';
@@ -32,9 +32,7 @@ function uniqueMatches(rows: Match[]): Match[] {
 
 export default function MyMatchesScreen({ navigation }: any) {
   const user = useAuthStore(s => s.user);
-  const myClubs = useUserClubs();
   const clubs = useClubsStore(s => s.clubs);
-  const selectedClubId = useScopeStore(s => s.selectedClubId);
   const localMatches = useMatchesStore(s => s.matches);
   const deleteMatchLocal = useMatchesStore(s => s.deleteMatch);
   const hub = useHubStore(s => s.matches);
@@ -48,27 +46,54 @@ export default function MyMatchesScreen({ navigation }: any) {
   const setUpcoming = usePublicFeedStore(s => s.setUpcomingMatches);
   const setCompleted = usePublicFeedStore(s => s.setCompletedMatches);
   const [filter, setFilter] = useState<Filter>('all');
+  const [userMatches, setUserMatches] = useState<Match[]>([]);
+  const [userMatchesReady, setUserMatchesReady] = useState(false);
+  const [showGoLivePremiumModal, setShowGoLivePremiumModal] = useState(false);
 
-  const clubIds = useMemo(() => {
-    const ids = new Set(myClubs.map(c => c.id));
-    if (selectedClubId) ids.add(selectedClubId);
-    if (user?.currentClubId) ids.add(user.currentClubId);
-    (user?.clubIds || []).forEach(id => ids.add(id));
-    return ids;
-  }, [myClubs, selectedClubId, user?.currentClubId, user?.clubIds]);
+  const handleGoLive = (match: Match) => {
+    if (canUserGoLiveOnMatch(user, match, clubs)) {
+      navigation.navigate('AdminBroadcast', { matchId: match.id });
+    } else {
+      setShowGoLivePremiumModal(true);
+    }
+  };
+
+  useEffect(() => {
+    if (!user?.id) {
+      setUserMatches([]);
+      setUserMatchesReady(true);
+      return;
+    }
+    const unsub = listenUserMatches(user.id, matches => {
+      setUserMatches(matches);
+      setUserMatchesReady(true);
+    });
+    return () => {
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [user?.id]);
 
   const mine = useMemo(() => {
-    const merged = uniqueMatches([...localMatches, ...hub, ...live, ...upcoming, ...completed]);
-    const scoped = clubIds.size
-      ? merged.filter(match => idsHasClub(clubIds, match.clubId))
-      : merged;
+    if (!user) return [];
+    const merged = uniqueMatches([
+      ...userMatches,
+      ...localMatches,
+      ...hub,
+      ...live,
+      ...upcoming,
+      ...completed,
+    ]);
+    const scoped = merged.filter(match => isUsersOwnMatch(user, match, clubs));
     return scoped.sort((a, b) => {
       const rank = (s: string) => (s === 'LIVE' ? 0 : s === 'UPCOMING' ? 1 : s === 'ABANDONED' ? 3 : 2);
       const byStatus = rank(a.status) - rank(b.status);
       if (byStatus !== 0) return byStatus;
-      return new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime();
+      if (a.status === 'UPCOMING') {
+        return new Date(a.dateTime || 0).getTime() - new Date(b.dateTime || 0).getTime();
+      }
+      return new Date(b.dateTime || 0).getTime() - new Date(a.dateTime || 0).getTime();
     });
-  }, [localMatches, hub, live, upcoming, completed, clubIds]);
+  }, [user, userMatches, localMatches, hub, live, upcoming, completed, clubs]);
 
   const filtered = useMemo(() => {
     if (filter === 'all') return mine;
@@ -97,6 +122,7 @@ export default function MyMatchesScreen({ navigation }: any) {
 
   function removeFromFeeds(id: string) {
     deleteMatchLocal(id);
+    setUserMatches(prev => prev.filter(m => m.id !== id));
     setHubMatches(hub.filter(m => m.id !== id));
     setLive(live.filter(m => m.id !== id));
     setUpcoming(upcoming.filter(m => m.id !== id));
@@ -145,7 +171,7 @@ export default function MyMatchesScreen({ navigation }: any) {
     );
   }
 
-    if (!hubReady && !feedReady) {
+  if (!hubReady && !feedReady && !userMatchesReady) {
     return (
       <ScreenScaffold title="My Matches" showScope={false}>
         <SkeletonMatchList count={4} />
@@ -153,11 +179,11 @@ export default function MyMatchesScreen({ navigation }: any) {
     );
   }
 
-return (
+  return (
     <ScreenScaffold
       title="My Matches"
       showScope={false}
-      subtitle={`${mine.length} scheduled`}
+      subtitle={`${mine.length} match${mine.length === 1 ? '' : 'es'}`}
       right={
         <TouchableOpacity onPress={createMatch} style={styles.headerBtn}>
           <Text style={styles.headerBtnText}>+ Match</Text>
@@ -178,7 +204,18 @@ return (
           const club = clubs.find(c => c.id === match.clubId);
           return (
             <View key={match.id}>
-              {!!club?.name && <Text style={styles.clubKicker}>{club.name}</Text>}
+              <View style={styles.cardHeaderRow}>
+                <Text style={styles.clubKicker}>{club?.name || 'MY FIXTURE'}</Text>
+                {(match.status === 'LIVE' || match.status === 'UPCOMING') &&
+                  isUsersOwnMatch(user, match, clubs) && (
+                    <TouchableOpacity
+                      onPress={() => handleGoLive(match)}
+                      style={styles.goLivePill}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+                      <Text style={styles.goLivePillText}>GO LIVE</Text>
+                    </TouchableOpacity>
+                  )}
+              </View>
               <MatchScoreCard
                 match={match}
                 clubName={club?.name}
@@ -208,25 +245,44 @@ return (
           </TouchableOpacity>
         )}
       </ScrollView>
+
+      <PremiumGoLiveModal
+        visible={showGoLivePremiumModal}
+        onClose={() => setShowGoLivePremiumModal(false)}
+      />
     </ScreenScaffold>
   );
 }
 
-function idsHasClub(ids: Set<string>, clubId?: string) {
-  if (!clubId) return true;
-  return ids.has(clubId);
-}
-
 const styles = StyleSheet.create({
   list: { padding: Spacing.base, paddingBottom: 48 },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+    marginTop: 4,
+  },
   clubKicker: {
     color: Colors.textMuted,
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.6,
-    marginBottom: 6,
-    marginTop: 4,
     textTransform: 'uppercase',
+  },
+  goLivePill: {
+    backgroundColor: Colors.live + '20',
+    borderWidth: 1,
+    borderColor: Colors.live + '66',
+    borderRadius: Radius.full,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  goLivePillText: {
+    color: Colors.live,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
   },
   headerBtn: {
     paddingHorizontal: 12,

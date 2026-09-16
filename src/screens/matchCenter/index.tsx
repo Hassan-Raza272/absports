@@ -1,12 +1,35 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, StatusBar, Animated } from 'react-native';
+import {
+  Animated,
+  Platform,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
-import { Colors, Typography, Spacing, Radius } from '../../theme';
-import { useAuthStore, useClubsStore, useHubStore, useMatchById, useMatchesStore, usePublicFeedStore } from '../../store';
+import { Colors, Radius, Shadow, Spacing, Typography } from '../../theme';
+import {
+  useAuthStore,
+  useClubsStore,
+  useHubStore,
+  useMatchById,
+  useMatchesStore,
+  usePublicFeedStore,
+  useTeamsStore,
+} from '../../store';
 import BackButton from '../../components/BackButton';
 import PremiumIcon from '../../components/PremiumIcon';
+import TeamLogoAvatar from '../../components/TeamLogoAvatar';
 import { matchShareMessage, shareText } from '../../utils/share';
-import { buildOverBuckets, buildPartnershipsAndFow, buildWagonShots, cumulativeRuns } from '../../utils/matchAnalytics';
+import {
+  buildOverBuckets,
+  buildPartnershipsAndFow,
+  buildWagonShots,
+  cumulativeRuns,
+} from '../../utils/matchAnalytics';
 import { buildSuperStars } from '../../utils/mvp';
 import { legalBallsPerOver, resolveMatchSettings } from '../../utils/matchSettings';
 import {
@@ -17,22 +40,23 @@ import {
 } from '../../utils/commentary';
 import { speakText, stopSpeaking } from '../../utils/voice';
 import { formatTargetLabel, getChaseTarget, getEffectiveOvers } from '../../utils/dls';
-import { canUserGoLiveOnMatch } from '../../utils/account';
+import { canUserGoLiveOnMatch, isUsersOwnMatch } from '../../utils/account';
 import { SkeletonMatchCenter } from '../../components/Skeleton';
+import PremiumGoLiveModal from '../../components/PremiumGoLiveModal';
 import ScreenScaffold from '../../components/ScreenScaffold';
 import { listenMatch } from '../../firebase';
 import { Match } from '../../types';
 
 type Tab = 'Summary' | 'Scorecard' | 'Commentary' | 'Insights' | 'Info';
 
-const BALL_COLORS: Record<string, string> = {
-  '4': '#2979FF',
-  '6': '#00C853',
-  'W': '#F44336',
-  'wd': '#FF6D00',
-  'nb': '#FF6D00',
-  '0': '#4A5568',
-};
+function shortLabel(name?: string) {
+  if (!name) return 'TM';
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return name.slice(0, 3).toUpperCase();
+}
 
 function BallPill({ ball }: { ball: Pick<CommentaryBall, 'runs' | 'wicket' | 'label' | 'extra'> }) {
   const parsed = parseBallLabel(ball.label || String(ball.runs));
@@ -48,19 +72,44 @@ function BallPill({ ball }: { ball: Pick<CommentaryBall, 'runs' | 'wicket' | 'la
           : /^b\d*$/i.test(parsed.base)
             ? 'b'
             : String(ball.runs);
-  const bg = BALL_COLORS[label] || (ball.extra ? '#FF6D00' : Colors.bgElevated);
-  const color = ball.wicket
-    ? Colors.loss
-    : ball.extra
-      ? Colors.accentOrange
-      : ball.runs === 4
-        ? Colors.accentBlue
-        : ball.runs === 6
-          ? Colors.win
-          : Colors.textPrimary;
+
+  const isBoundary4 = !ball.wicket && !ball.extra && ball.runs === 4;
+  const isBoundary6 = !ball.wicket && !ball.extra && ball.runs === 6;
+  const isWicket = Boolean(ball.wicket);
+  const isExtra = Boolean(ball.extra);
+  const isDot = !ball.wicket && !ball.extra && ball.runs === 0;
+
+  let pillBg = 'rgba(255,255,255,0.12)';
+  let pillBorder = 'rgba(255,255,255,0.22)';
+  let pillTextColor = '#F8FAFC';
+
+  if (isWicket) {
+    pillBg = '#EF4444';
+    pillBorder = '#DC2626';
+    pillTextColor = '#FFFFFF';
+  } else if (isBoundary6) {
+    pillBg = '#10B981';
+    pillBorder = '#059669';
+    pillTextColor = '#FFFFFF';
+  } else if (isBoundary4) {
+    pillBg = '#3B82F6';
+    pillBorder = '#2563EB';
+    pillTextColor = '#FFFFFF';
+  } else if (isExtra) {
+    pillBg = '#F59E0B';
+    pillBorder = '#D97706';
+    pillTextColor = '#FFFFFF';
+  } else if (isDot) {
+    pillBg = 'rgba(255,255,255,0.08)';
+    pillBorder = 'rgba(255,255,255,0.15)';
+    pillTextColor = '#94A3B8';
+  }
+
   return (
-    <View style={[styles.ballPill, { backgroundColor: bg + '33', borderColor: bg }]}>
-      <Text style={[styles.ballPillText, { color }]}>{label}</Text>
+    <View style={[styles.ballPill, { backgroundColor: pillBg, borderColor: pillBorder }]}>
+      <Text style={[styles.ballPillText, { color: pillTextColor }]}>
+        {isDot ? '•' : label}
+      </Text>
     </View>
   );
 }
@@ -77,6 +126,8 @@ export default function MatchCenterScreen({ route, navigation }: any) {
   const hubReady = useHubStore(state => state.ready);
   const user = useAuthStore(state => state.user);
   const clubs = useClubsStore(state => state.clubs);
+  const localTeams = useTeamsStore(state => state.teams);
+  const hubTeams = useHubStore(state => state.teams);
   const clubName = clubs.find(c => c.id === match?.clubId)?.name;
   const [tab, setTab] = useState<Tab>(match?.status === 'COMPLETED' ? 'Summary' : 'Scorecard');
   const [voiceOn, setVoiceOn] = useState(false);
@@ -100,18 +151,38 @@ export default function MatchCenterScreen({ route, navigation }: any) {
     if (match?.status === 'LIVE') {
       Animated.loop(
         Animated.sequence([
-          Animated.timing(pulse, { toValue: 1.3, duration: 600, useNativeDriver: true }),
+          Animated.timing(pulse, { toValue: 1.25, duration: 600, useNativeDriver: true }),
           Animated.timing(pulse, { toValue: 1, duration: 600, useNativeDriver: true }),
         ]),
       ).start();
     }
   }, [match?.status, pulse]);
 
+  const [showGoLivePremiumModal, setShowGoLivePremiumModal] = useState(false);
+
   useEffect(() => {
     return () => {
       stopSpeaking();
     };
   }, []);
+
+  const logos = useMemo(() => {
+    if (!match) return { a: undefined, b: undefined, aShort: '', bShort: '' };
+    const all = [...(localTeams || []), ...(hubTeams || [])];
+    const find = (id?: string, name?: string) =>
+      all.find(t => t.id === id) ||
+      all.find(t => t.name === name) ||
+      all.find(t => t.shortName && name && t.shortName.toLowerCase() === name.toLowerCase()) ||
+      all.find(t => name && t.name && t.name.toLowerCase() === name.toLowerCase());
+    const teamA = find(match.teamA, match.teamAName);
+    const teamB = find(match.teamB, match.teamBName);
+    return {
+      a: match.teamALogo || teamA?.logoURL,
+      b: match.teamBLogo || teamB?.logoURL,
+      aShort: teamA?.shortName || shortLabel(match.teamAName),
+      bShort: teamB?.shortName || shortLabel(match.teamBName),
+    };
+  }, [localTeams, hubTeams, match]);
 
   const inn1 = match?.innings?.first;
   const inn2 = match?.innings?.second;
@@ -165,19 +236,18 @@ export default function MatchCenterScreen({ route, navigation }: any) {
   }
 
   const isLive = match.status === 'LIVE';
-  const onDarkHero = !isLive;
-  const heroFg = onDarkHero ? Colors.onPrimary : Colors.textPrimary;
-  const heroMuted = onDarkHero ? 'rgba(255,255,255,0.92)' : Colors.textSecondary;
-  const heroSoft = onDarkHero ? 'rgba(255,255,255,0.88)' : Colors.textMuted;
-  const heroIcon = onDarkHero ? Colors.onPrimary : Colors.textSecondary;
-  const heroAction = onDarkHero ? Colors.onPrimary : Colors.primary;
   const firstBattingTeam = inn1?.battingTeam === match.teamB ? 'B' : 'A';
   const firstTeamName = firstBattingTeam === 'A' ? match.teamAName : match.teamBName;
   const secondTeamName = firstBattingTeam === 'A' ? match.teamBName : match.teamAName;
+  const firstTeamLogo = firstBattingTeam === 'A' ? logos.a : logos.b;
+  const firstTeamShort = firstBattingTeam === 'A' ? logos.aShort : logos.bShort;
+  const secondTeamLogo = firstBattingTeam === 'A' ? logos.b : logos.a;
+  const secondTeamShort = firstBattingTeam === 'A' ? logos.bShort : logos.aShort;
+
   const liveInn = match.currentInnings === 2 ? inn2 : inn1;
   const liveBalls = liveInn ? (liveInn.overs || 0) * 6 + (liveInn.balls || 0) : 0;
-  const crr = liveBalls > 0 && liveInn ? ((liveInn.runs * 6) / liveBalls) : 0;
-  const target = getChaseTarget(match) ?? ((inn1?.runs || 0) + 1);
+  const crr = liveBalls > 0 && liveInn ? (liveInn.runs * 6) / liveBalls : 0;
+  const target = getChaseTarget(match) ?? (inn1?.runs || 0) + 1;
   const chasing = match.currentInnings === 2 && inn1 && inn2;
   const runsNeeded = chasing ? Math.max(0, target - (inn2?.runs || 0)) : 0;
   const chaseOvers = getEffectiveOvers(match, 2);
@@ -221,199 +291,325 @@ export default function MatchCenterScreen({ route, navigation }: any) {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle={onDarkHero ? 'light-content' : 'dark-content'} backgroundColor="transparent" translucent />
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
 
-      {/* Hero Score Panel */}
-      <LinearGradient colors={isLive ? Colors.gradLiveCard : Colors.gradHeader} style={styles.hero}>
-        <View style={styles.topRow}>
-          <BackButton onPress={() => navigation.goBack()} color={heroFg} style={styles.backBtn} />
-          <View style={styles.voiceRow}>
-            {isLive && canUserGoLiveOnMatch(user, match, clubs) && (
-              <>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        stickyHeaderIndices={[1]}
+        contentContainerStyle={{ paddingBottom: 90 }}>
+
+        {/* Top Hero Score Panel with Modern Sports Broadcast Design */}
+        <LinearGradient
+          colors={['#E03A58', '#C41A3B', '#800F2F']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.hero}>
+          
+          {/* Header Action Bar */}
+          <View style={styles.topRow}>
+            <View style={styles.backCircle}>
+              <BackButton onPress={() => navigation.goBack()} color="#FFFFFF" iconOnly />
+            </View>
+            <View style={styles.voiceRow}>
+              {isLive && isUsersOwnMatch(user, match, clubs) && (
                 <TouchableOpacity
-                  onPress={() => navigation.navigate('AdminBroadcast', { matchId: match.id })}
+                  onPress={() => {
+                    if (canUserGoLiveOnMatch(user, match, clubs)) {
+                      navigation.navigate('AdminBroadcast', { matchId: match.id });
+                    } else {
+                      setShowGoLivePremiumModal(true);
+                    }
+                  }}
                   style={styles.overlayBtn}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <View style={styles.broadcastDot} />
                   <Text style={styles.overlayBtnText}>Go Live</Text>
                 </TouchableOpacity>
-              </>
-            )}
-            <TouchableOpacity
-              onPress={() => shareText(`${match.teamAName} vs ${match.teamBName}`, matchShareMessage(match, clubName))}
-              style={[styles.voiceBtn, onDarkHero && styles.voiceBtnOnDark]}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Text style={{ color: heroAction, fontWeight: '800', fontSize: 11 }}>Share</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={speakScoreNow}
-              style={[styles.voiceBtn, onDarkHero && styles.voiceBtnOnDark]}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <PremiumIcon name="volume" size={18} color={heroIcon} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={toggleVoice}
-              style={[styles.voiceToggle, voiceOn && styles.voiceToggleOn, onDarkHero && styles.voiceBtnOnDark]}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <PremiumIcon
-                name={voiceOn ? 'volume' : 'volume-mute'}
-                size={16}
-                color={voiceOn ? heroAction : heroIcon}
-              />
-              <Text style={[styles.voiceToggleText, { color: voiceOn ? heroAction : heroIcon }]}>
-                {voiceOn ? 'LIVE VOICE' : 'VOICE'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {isLive && (
-          <View style={styles.liveRow}>
-            <LinearGradient colors={['#FF3B30', '#FF6D00']} style={styles.liveBadge}>
-              <Animated.View style={[styles.liveDot, { transform: [{ scale: pulse }] }]} />
-              <Text style={styles.liveText}>LIVE</Text>
-            </LinearGradient>
-            <Text style={[styles.matchNumText, { color: heroMuted }]}>Match {match.matchNumber}</Text>
-          </View>
-        )}
-
-        <View style={styles.scoreBlock}>
-          <View style={styles.teamScoreBlock}>
-            <Text style={[styles.teamNameHero, { color: heroMuted }]}>{firstTeamName}</Text>
-            {inn1 ? (
-              <>
-                <Text style={[styles.bigScore, { color: heroFg }]}>{inn1.runs}/{inn1.wickets}</Text>
-                <Text style={[styles.oversText, { color: heroMuted }]}>{inn1.overs}.{inn1.balls} Overs</Text>
-              </>
-            ) : (
-              <Text style={[styles.yetToBat, { color: heroSoft }]}>Yet to bat</Text>
-            )}
-          </View>
-          <View style={styles.vsSep}>
-            <Text style={[styles.vsHero, { color: heroSoft }]}>VS</Text>
-            {isLive && liveBalls > 0 && <Text style={styles.crrText}>CRR{'\n'}{crr.toFixed(2)}</Text>}
-          </View>
-          <View style={[styles.teamScoreBlock, { alignItems: 'flex-end' }]}>
-            <Text style={[styles.teamNameHero, { color: heroMuted }]}>{secondTeamName}</Text>
-            {inn2 ? (
-              <>
-                <Text style={[styles.bigScore, { color: heroFg }]}>{inn2.runs}/{inn2.wickets}</Text>
-                <Text style={[styles.oversText, { color: heroMuted }]}>{inn2.overs}.{inn2.balls} Overs</Text>
-              </>
-            ) : (
-              <Text style={[styles.yetToBat, { color: heroSoft }]}>Yet to bat</Text>
-            )}
-          </View>
-        </View>
-
-        {isLive && chasing && (
-          <LinearGradient colors={Colors.gradCard} style={styles.needRow}>
-            <Text style={styles.needText}>
-              🎯 Target {target} · Need {runsNeeded} from {ballsLeft} balls
-              {match.dls?.applied ? ' · DLS' : ''}
-            </Text>
-            <Text style={styles.rrrText}>RRR: {rrr.toFixed(2)}</Text>
-          </LinearGradient>
-        )}
-
-        {isLive && match.currentInnings === 2 && inn1 && !inn2 && (
-          <Text style={[styles.needText, { textAlign: 'center', marginBottom: Spacing.sm }]}>
-            {formatTargetLabel(match)}
-          </Text>
-        )}
-
-        {isLive && session?.setupComplete && (
-          <View style={styles.currentPlayers}>
-            <View style={styles.batsmenRow}>
-              <View style={styles.batsmanCard}>
-                <Text style={styles.batsmanLabel}>⬛ {session.strikerName}</Text>
-                <Text style={styles.batsmanScore}>
-                  {session.strikerRuns} ({session.strikerBalls})
+              )}
+              <TouchableOpacity
+                onPress={() => shareText(`${match.teamAName} vs ${match.teamBName}`, matchShareMessage(match, clubName))}
+                style={styles.actionPill}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <PremiumIcon name="explore" size={13} color="#FFFFFF" />
+                <Text style={styles.actionPillText}>Share</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={toggleVoice}
+                style={[styles.voiceToggle, voiceOn && styles.voiceToggleOn]}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <PremiumIcon
+                  name={voiceOn ? 'volume' : 'volume-mute'}
+                  size={13}
+                  color={voiceOn ? '#10B981' : '#FFFFFF'}
+                />
+                <Text style={[styles.voiceToggleText, voiceOn && { color: '#10B981' }]}>
+                  {voiceOn ? 'LIVE VOICE' : 'VOICE'}
                 </Text>
-              </View>
-              <View style={styles.batsmanCard}>
-                <Text style={styles.batsmanLabel}>{session.nonStrikerName}</Text>
-                <Text style={styles.batsmanScore}>
-                  {session.nonStrikerRuns} ({session.nonStrikerBalls})
-                </Text>
-              </View>
-              <View style={styles.bowlerCard}>
-                <Text style={styles.batsmanLabel}>⚾ {session.bowlerName}</Text>
-                <Text style={styles.batsmanScore}>
-                  {session.bowlerOvers}.{session.bowlerBalls} • {session.bowlerWickets}/{session.bowlerRuns}
-                </Text>
-              </View>
+              </TouchableOpacity>
             </View>
           </View>
-        )}
 
-        {isLive && (session?.ballLog?.length || 0) > 0 && (
-          <View style={styles.lastBalls}>
-            <Text style={styles.overLabel}>This over: </Text>
-            {session!.ballLog.slice(-6).map((label, i) => {
-              const parsed = parseBallLabel(label);
-              return (
-                <BallPill
-                  key={`${label}-${i}`}
-                  ball={{
-                    label,
-                    runs: parsed.runs,
-                    wicket: parsed.wicket,
-                    extra: parsed.extra,
-                  }}
-                />
-              );
-            })}
-          </View>
-        )}
-
-        {match.result && (
-          <View style={[styles.resultBanner, onDarkHero && styles.resultBannerOnDark]}>
-            <Text style={[styles.resultText, { color: heroFg }]}>🏆 {match.result}</Text>
-            {match.playerOfMatch ? (
-              <Text style={[styles.resultText, { marginTop: 4, color: heroFg }]}>
-                ⭐ PoM: {match.playerOfMatch}
-              </Text>
+          {/* Live / Match Status Badge */}
+          <View style={styles.liveMetaRow}>
+            {isLive ? (
+              <View style={styles.liveBadgeContainer}>
+                <Animated.View style={[styles.liveDot, { transform: [{ scale: pulse }] }]} />
+                <Text style={styles.liveBadgeText}>LIVE</Text>
+              </View>
+            ) : (
+              <View style={[styles.liveBadgeContainer, { backgroundColor: 'rgba(255,255,255,0.14)' }]}>
+                <Text style={[styles.liveBadgeText, { color: '#E2E8F0' }]}>{match.status}</Text>
+              </View>
+            )}
+            <View style={styles.matchPillBadge}>
+              <Text style={styles.matchPillText}>Match {match.matchNumber || '—'}</Text>
+            </View>
+            {match.overs ? (
+              <View style={styles.oversPillBadge}>
+                <Text style={styles.oversPillText}>{match.overs} Overs</Text>
+              </View>
+            ) : null}
+            {clubName ? (
+              <View style={styles.clubPillBadge}>
+                <Text style={styles.clubPillText} numberOfLines={1}>{clubName}</Text>
+              </View>
             ) : null}
           </View>
-        )}
 
-        {match.toss && (
-          <Text style={[styles.tossText, { color: heroMuted }]}>Toss: {match.toss.winner} opt to {match.toss.decision}</Text>
-        )}
-      </LinearGradient>
-
-      {/* Tabs */}
-      <View style={styles.tabs}>
-        {(['Summary', 'Scorecard', 'Commentary', 'Insights', 'Info'] as Tab[]).map(t => (
-          <TouchableOpacity key={t} style={[styles.tab, tab === t && styles.tabActive]} onPress={() => setTab(t)}>
-            <Text style={[styles.tabText, tab === t && { color: Colors.primary }]}>{t}</Text>
-            {tab === t && <View style={styles.tabBar} />}
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: Spacing.base, paddingBottom: 80 }}>
-        {tab === 'Summary' && (
-          <View>
-            {match.status === 'COMPLETED' && (
-              <View style={[styles.winnerCard, { marginBottom: Spacing.md }]}>
-                <Text style={styles.winnerLabel}>MATCH RESULT</Text>
-                <Text style={styles.winnerResult}>🏆 {match.result || 'Match completed'}</Text>
-                <View style={styles.pomRow}>
-                  <Text style={styles.pomLabel}>PLAYER OF THE MATCH</Text>
-                  <Text style={styles.playerOfMatch}>
-                    {match.playerOfMatch ? `⭐ ${match.playerOfMatch}` : 'Not selected yet'}
-                  </Text>
+          {/* Teams and Scores Hero Section with Team Logos */}
+          <View style={styles.matchHeroCard}>
+            {/* Team A (First Batting Team) */}
+            <View style={styles.teamHeroCol}>
+              <View style={styles.teamLogoWrapper}>
+                <TeamLogoAvatar
+                  name={firstTeamName}
+                  shortName={firstTeamShort}
+                  logoURL={firstTeamLogo}
+                  size={58}
+                />
+              </View>
+              <Text style={styles.teamNameText} numberOfLines={1}>
+                {firstTeamName}
+              </Text>
+              {inn1 ? (
+                <View style={styles.scoreContainer}>
+                  <Text style={styles.scoreLargeText}>{inn1.runs}/{inn1.wickets}</Text>
+                  <Text style={styles.oversSmallText}>{inn1.overs}.{inn1.balls} ov</Text>
                 </View>
+              ) : (
+                <View style={styles.yetToBatPill}>
+                  <Text style={styles.yetToBatText}>Yet to bat</Text>
+                </View>
+              )}
+            </View>
+
+            {/* Center VS & Run Rates */}
+            <View style={styles.midHeroCol}>
+              <LinearGradient colors={['rgba(255,255,255,0.18)', 'rgba(255,255,255,0.06)']} style={styles.vsCircle}>
+                <Text style={styles.vsText}>VS</Text>
+              </LinearGradient>
+              {isLive && liveBalls > 0 ? (
+                <View style={styles.crrContainer}>
+                  <Text style={styles.crrLabel}>CRR</Text>
+                  <Text style={styles.crrNumber}>{crr.toFixed(2)}</Text>
+                </View>
+              ) : null}
+            </View>
+
+            {/* Team B (Second Team) */}
+            <View style={styles.teamHeroCol}>
+              <View style={styles.teamLogoWrapper}>
+                <TeamLogoAvatar
+                  name={secondTeamName}
+                  shortName={secondTeamShort}
+                  logoURL={secondTeamLogo}
+                  size={58}
+                />
+              </View>
+              <Text style={styles.teamNameText} numberOfLines={1}>
+                {secondTeamName}
+              </Text>
+              {inn2 ? (
+                <View style={styles.scoreContainer}>
+                  <Text style={styles.scoreLargeText}>{inn2.runs}/{inn2.wickets}</Text>
+                  <Text style={styles.oversSmallText}>{inn2.overs}.{inn2.balls} ov</Text>
+                </View>
+              ) : (
+                <View style={styles.yetToBatPill}>
+                  <Text style={styles.yetToBatText}>Yet to bat</Text>
+                </View>
+              )}
+            </View>
+          </View>
+
+          {/* Chasing / Target Status Bar */}
+          {isLive && chasing && (
+            <LinearGradient
+              colors={['rgba(255,255,255,0.14)', 'rgba(255,255,255,0.06)']}
+              style={styles.targetBanner}>
+              <Text style={styles.targetBannerText}>
+                🎯 Target <Text style={{ fontWeight: '900', color: '#FBBF24' }}>{target}</Text> · Need <Text style={{ fontWeight: '900', color: '#FFFFFF' }}>{runsNeeded}</Text> from <Text style={{ fontWeight: '900', color: '#FFFFFF' }}>{ballsLeft}</Text> b
+                {match.dls?.applied ? ' · DLS' : ''}
+              </Text>
+              <View style={styles.rrrBadge}>
+                <Text style={styles.rrrBadgeText}>RRR {rrr.toFixed(2)}</Text>
+              </View>
+            </LinearGradient>
+          )}
+
+          {isLive && match.currentInnings === 2 && inn1 && !inn2 && (
+            <View style={styles.targetBanner}>
+              <Text style={styles.targetBannerText}>
+                {formatTargetLabel(match)}
+              </Text>
+            </View>
+          )}
+
+          {/* Current Players Live Pitch Cards (Striker, Non-Striker, Bowler) */}
+          {isLive && session?.setupComplete && (
+            <View style={styles.livePlayersGrid}>
+              {/* Striker */}
+              <View style={[styles.playerCard, styles.strikerCard]}>
+                <View style={styles.playerCardHeader}>
+                  <View style={styles.strikerDot} />
+                  <Text style={styles.playerRoleText}>Striker 🏏</Text>
+                </View>
+                <Text style={styles.playerNameText} numberOfLines={1}>
+                  {session.strikerName}*
+                </Text>
+                <Text style={styles.playerScoreHighlight}>
+                  {session.strikerRuns} <Text style={styles.playerBallsSub}>({session.strikerBalls || 0})</Text>
+                </Text>
+                <Text style={styles.playerSubStat}>
+                  SR: {session.strikerBalls ? (((session.strikerRuns || 0) * 100) / session.strikerBalls).toFixed(0) : '0'} · {session.strikerFours || 0}x4, {session.strikerSixes || 0}x6
+                </Text>
+              </View>
+
+              {/* Non-Striker */}
+              <View style={styles.playerCard}>
+                <View style={styles.playerCardHeader}>
+                  <Text style={styles.playerRoleText}>Non-Striker</Text>
+                </View>
+                <Text style={styles.playerNameText} numberOfLines={1}>
+                  {session.nonStrikerName}
+                </Text>
+                <Text style={styles.playerScoreHighlight}>
+                  {session.nonStrikerRuns} <Text style={styles.playerBallsSub}>({session.nonStrikerBalls || 0})</Text>
+                </Text>
+                <Text style={styles.playerSubStat}>
+                  SR: {session.nonStrikerBalls ? (((session.nonStrikerRuns || 0) * 100) / session.nonStrikerBalls).toFixed(0) : '0'}
+                </Text>
+              </View>
+
+              {/* Bowler */}
+              <View style={[styles.playerCard, styles.bowlerCard]}>
+                <View style={styles.playerCardHeader}>
+                  <Text style={styles.playerRoleText}>Bowler ⚾</Text>
+                </View>
+                <Text style={styles.playerNameText} numberOfLines={1}>
+                  {session.bowlerName}
+                </Text>
+                <Text style={styles.playerScoreHighlight}>
+                  {session.bowlerWickets}/{session.bowlerRuns}
+                </Text>
+                <Text style={styles.playerSubStat}>
+                  {session.bowlerOvers}.{session.bowlerBalls} ov · Eco {(session.bowlerOvers || session.bowlerBalls) ? (((session.bowlerRuns || 0) * 6) / ((session.bowlerOvers || 0) * 6 + (session.bowlerBalls || 0))).toFixed(1) : '0.0'}
+                </Text>
+              </View>
+            </View>
+          )}
+
+          {/* This Over Ball Trail */}
+          {isLive && (session?.ballLog?.length || 0) > 0 && (
+            <View style={styles.overTrailRow}>
+              <Text style={styles.overTrailLabel}>This over:</Text>
+              <View style={styles.ballPillList}>
+                {session!.ballLog.slice(-6).map((label, i) => {
+                  const parsed = parseBallLabel(label);
+                  return (
+                    <BallPill
+                      key={`${label}-${i}`}
+                      ball={{
+                        label,
+                        runs: parsed.runs,
+                        wicket: parsed.wicket,
+                        extra: parsed.extra,
+                      }}
+                    />
+                  );
+                })}
+              </View>
+            </View>
+          )}
+
+          {/* Match Result Banner */}
+          {match.result && (
+            <View style={styles.resultBannerHero}>
+              <Text style={styles.resultBannerTitle}>🏆 {match.result}</Text>
+              {match.playerOfMatch ? (
+                <Text style={styles.resultBannerSub}>
+                  ⭐ Player of the Match: <Text style={{ fontWeight: '800', color: '#FBBF24' }}>{match.playerOfMatch}</Text>
+                </Text>
+              ) : null}
+            </View>
+          )}
+
+          {/* Toss Text */}
+          {match.toss && (
+            <View style={styles.tossRow}>
+              <Text style={styles.tossText}>
+                🪙 Toss: <Text style={{ fontWeight: '700', color: '#FFFFFF' }}>{match.toss.winner}</Text> opted to {match.toss.decision}
+              </Text>
+            </View>
+          )}
+        </LinearGradient>
+
+        {/* Horizontal Scrollable Tabs Navigation */}
+        <View style={styles.tabsContainer}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.tabsScrollContent}>
+            {(['Summary', 'Scorecard', 'Commentary', 'Insights', 'Info'] as Tab[]).map(t => {
+              const isActive = tab === t;
+              return (
+                <TouchableOpacity
+                  key={t}
+                  style={[styles.tabPillBtn, isActive && styles.tabPillBtnActive]}
+                  onPress={() => setTab(t)}>
+                  <Text style={[styles.tabPillLabel, isActive && styles.tabPillLabelActive]}>{t}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+
+        {/* Tab Content Screens */}
+        <View style={{ padding: Spacing.base }}>
+        
+        {/* SUMMARY TAB */}
+        {tab === 'Summary' && (
+          <View style={{ gap: Spacing.md }}>
+            {match.status === 'COMPLETED' && (
+              <View style={styles.summaryResultCard}>
+                <Text style={styles.summaryResultHeading}>MATCH RESULT</Text>
+                <Text style={styles.summaryResultTitle}>🏆 {match.result || 'Match completed'}</Text>
+                {match.playerOfMatch ? (
+                  <View style={styles.pomContainer}>
+                    <Text style={styles.pomHeading}>PLAYER OF THE MATCH</Text>
+                    <Text style={styles.pomName}>⭐ {match.playerOfMatch}</Text>
+                  </View>
+                ) : null}
               </View>
             )}
-            <View style={styles.summaryLegend}>
-              <Text style={styles.summaryLegendText}>Top scorers</Text>
-              <Text style={styles.summaryLegendText}>Best bowlers</Text>
-            </View>
-            {[{ innings: inn1, teamName: firstTeamName }, { innings: inn2, teamName: secondTeamName }]
-              .filter(item => !!item.innings)
-              .map(({ innings, teamName }, index) => {
+
+            {/* Innings Summaries */}
+            {[
+              { innings: inn1, teamName: firstTeamName, logo: firstTeamLogo, short: firstTeamShort },
+              { innings: inn2, teamName: secondTeamName, logo: secondTeamLogo, short: secondTeamShort },
+            ]
+              .filter(item => Boolean(item.innings))
+              .map(({ innings, teamName, logo, short }, index) => {
                 const topBatters = [...(innings?.batting || [])]
                   .sort((a: any, b: any) => (b.runs || 0) - (a.runs || 0) || (b.balls || 0) - (a.balls || 0))
                   .slice(0, 3);
@@ -421,155 +617,256 @@ export default function MatchCenterScreen({ route, navigation }: any) {
                   .sort((a: any, b: any) => (b.wickets || 0) - (a.wickets || 0) || (a.runs || 0) - (b.runs || 0))
                   .slice(0, 3);
                 const pomKey = (match.playerOfMatch || '').trim().toLowerCase();
+
                 return (
-                  <View key={`${teamName}-${index}`} style={styles.summaryInnings}>
-                    <View style={styles.summaryTitleRow}>
-                      <Text style={styles.summaryTeam} numberOfLines={1}>{teamName}</Text>
-                      <Text style={styles.summaryScore}>{innings?.runs}-{innings?.wickets} ({innings?.overs}.{innings?.balls})</Text>
+                  <View key={`${teamName}-${index}`} style={styles.summaryCard}>
+                    <View style={styles.summaryHeader}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.sm }}>
+                        <TeamLogoAvatar name={teamName} shortName={short} logoURL={logo} size={36} />
+                        <Text style={styles.summaryTeamTitle} numberOfLines={1}>{teamName}</Text>
+                      </View>
+                      <View style={styles.summaryScoreBadge}>
+                        <Text style={styles.summaryScoreText}>
+                          {innings?.runs}-{innings?.wickets} ({innings?.overs}.{innings?.balls})
+                        </Text>
+                      </View>
                     </View>
+
+                    <View style={styles.summaryDivider} />
+
                     {topBatters.length === 0 ? (
-                      <Text style={styles.dismissal}>No batting figures yet.</Text>
+                      <Text style={styles.emptyNote}>No batting figures yet.</Text>
                     ) : (
                       topBatters.map((b: any, i: number) => {
                         const batPom = pomKey && String(b.name || '').toLowerCase() === pomKey;
                         const bowlPom = pomKey && String(topBowlers[i]?.name || '').toLowerCase() === pomKey;
                         return (
-                        <View key={`${b.name}-${i}`} style={styles.summaryLine}>
-                          <Text style={styles.summaryRank}>{i + 1}</Text>
-                          <Text style={[styles.summaryName, batPom && { color: Colors.primary }]} numberOfLines={1}>
-                            {batPom ? '⭐ ' : ''}{b.name}{b.status === 'NOT_OUT' ? '*' : ''}
-                          </Text>
-                          <Text style={styles.summaryFigure}>{b.runs} ({b.balls})</Text>
-                          <Text style={[styles.summaryName, bowlPom && { color: Colors.primary }]} numberOfLines={1}>
-                            {bowlPom ? '⭐ ' : ''}{topBowlers[i]?.name || '—'}
-                          </Text>
-                          <Text style={styles.summaryFigure}>
-                            {topBowlers[i] ? `${topBowlers[i].wickets}-${topBowlers[i].runs}` : '—'}
-                          </Text>
-                        </View>
+                          <View key={`${b.name}-${i}`} style={styles.summaryStatRow}>
+                            <Text style={styles.summaryRankNum}>{i + 1}</Text>
+                            <Text style={[styles.summaryBatterText, batPom && { color: Colors.primary }]} numberOfLines={1}>
+                              {batPom ? '⭐ ' : ''}{b.name}{b.status === 'NOT_OUT' ? '*' : ''}
+                            </Text>
+                            <Text style={styles.summaryStatFigure}>{b.runs} ({b.balls})</Text>
+                            <View style={styles.summaryVerticalDivider} />
+                            <Text style={[styles.summaryBowlerText, bowlPom && { color: Colors.primary }]} numberOfLines={1}>
+                              {bowlPom ? '⭐ ' : ''}{topBowlers[i]?.name || '—'}
+                            </Text>
+                            <Text style={styles.summaryStatFigure}>
+                              {topBowlers[i] ? `${topBowlers[i].wickets}-${topBowlers[i].runs}` : '—'}
+                            </Text>
+                          </View>
                         );
                       })
                     )}
                   </View>
                 );
               })}
+
             {stars.length > 0 && (
-              <View style={styles.winnerCard}>
-                <Text style={styles.winnerLabel}>SUPER STARS</Text>
+              <View style={styles.summaryResultCard}>
+                <Text style={styles.summaryResultHeading}>MATCH MVPs & SUPER STARS</Text>
                 {stars.map((s, i) => (
-                  <Text key={s.name} style={styles.playerOfMatch}>{i + 1}. {s.name} · {s.points} pts · {s.detail}</Text>
+                  <Text key={s.name} style={styles.superStarLine}>
+                    {i + 1}. {s.name} · <Text style={{ fontWeight: '800', color: Colors.primary }}>{s.points} pts</Text> · {s.detail}
+                  </Text>
                 ))}
               </View>
             )}
           </View>
         )}
+
+        {/* SCORECARD TAB */}
         {tab === 'Scorecard' && (
-          <>
+          <View style={{ gap: Spacing.lg }}>
             {inn1 && (
-              <View>
-                <Text style={styles.inningsTitle}>{firstTeamName} Innings</Text>
-                <View style={styles.tableHeader}>
-                  <Text style={[styles.col, { flex: 2 }]}>Batter</Text>
-                  <Text style={styles.col}>R</Text>
-                  <Text style={styles.col}>B</Text>
-                  <Text style={styles.col}>4s</Text>
-                  <Text style={styles.col}>6s</Text>
-                  <Text style={styles.col}>SR</Text>
-                </View>
-                {(inn1.batting && inn1.batting.length > 0 ? inn1.batting : []).map((b: any, i: number) => (
-                  <View key={i} style={[styles.tableRow, i % 2 === 0 && styles.tableRowAlt]}>
-                    <View style={{ flex: 2 }}>
-                      <Text style={[styles.playerCell, match.playerOfMatch === b.name && { color: Colors.primary }]}>
-                        {match.playerOfMatch === b.name ? '⭐ ' : ''}{b.status === 'NOT_OUT' ? `${b.name}*` : b.name}
-                      </Text>
-                      {b.out && <Text style={styles.dismissal}>{b.out}</Text>}
-                      {!b.out && b.status === 'NOT_OUT' && <Text style={styles.dismissal}>not out</Text>}
-                    </View>
-                    <Text style={[styles.col, { fontWeight: '700', color: Colors.textPrimary }]}>{b.runs}</Text>
-                    <Text style={styles.col}>{b.balls}</Text>
-                    <Text style={styles.col}>{b.fours ?? 0}</Text>
-                    <Text style={styles.col}>{b.sixes ?? 0}</Text>
-                    <Text style={styles.col}>{typeof b.strikeRate === 'number' ? b.strikeRate.toFixed(1) : (b.balls ? ((b.runs * 100) / b.balls).toFixed(1) : '0.0')}</Text>
+              <View style={styles.scorecardInningsCard}>
+                {/* Team Header */}
+                <View style={styles.scorecardInningsHeader}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.sm }}>
+                    <TeamLogoAvatar name={firstTeamName} shortName={firstTeamShort} logoURL={firstTeamLogo} size={36} />
+                    <Text style={styles.inningsHeaderName}>{firstTeamName} Innings</Text>
                   </View>
-                ))}
-                {(!inn1.batting || inn1.batting.length === 0) && (
-                  <Text style={styles.dismissal}>Scorecard will appear as balls are scored.</Text>
-                )}
-                <View style={styles.extraRow}>
-                  <Text style={styles.extraText}>
-                    Extras: {inn1.extras?.total || 0} (Wd: {inn1.extras?.wides || 0}, Nb: {inn1.extras?.noBalls || 0}, B: {inn1.extras?.byes || 0}, Lb: {inn1.extras?.legByes || 0})
+                  <View style={styles.inningsHeaderScorePill}>
+                    <Text style={styles.inningsHeaderScoreText}>
+                      {inn1.runs}/{inn1.wickets} ({inn1.overs}.{inn1.balls} ov)
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Batting Table */}
+                <View style={styles.tableCard}>
+                  <View style={styles.tableHeadRow}>
+                    <Text style={[styles.tableHeadCol, { flex: 2.2, textAlign: 'left', paddingLeft: 8 }]}>Batter</Text>
+                    <Text style={styles.tableHeadCol}>R</Text>
+                    <Text style={styles.tableHeadCol}>B</Text>
+                    <Text style={styles.tableHeadCol}>4s</Text>
+                    <Text style={styles.tableHeadCol}>6s</Text>
+                    <Text style={styles.tableHeadCol}>SR</Text>
+                  </View>
+
+                  {(inn1.batting && inn1.batting.length > 0 ? inn1.batting : []).map((b: any, i: number) => {
+                    const isNotOut = !b.out && b.status === 'NOT_OUT';
+                    return (
+                      <View key={i} style={[styles.tableDataRow, i % 2 === 1 && styles.tableDataRowAlt]}>
+                        <View style={{ flex: 2.2, paddingLeft: 8 }}>
+                          <Text style={[styles.playerCellText, match.playerOfMatch === b.name && { color: Colors.primary }]}>
+                            {match.playerOfMatch === b.name ? '⭐ ' : ''}{b.name}{isNotOut ? '*' : ''}
+                          </Text>
+                          {b.out ? (
+                            <Text style={styles.dismissalText}>{b.out}</Text>
+                          ) : isNotOut ? (
+                            <Text style={styles.notOutBadge}>not out</Text>
+                          ) : null}
+                        </View>
+                        <Text style={[styles.tableDataCol, { fontWeight: '900', color: Colors.textPrimary }]}>{b.runs}</Text>
+                        <Text style={styles.tableDataCol}>{b.balls}</Text>
+                        <Text style={styles.tableDataCol}>{b.fours ?? 0}</Text>
+                        <Text style={styles.tableDataCol}>{b.sixes ?? 0}</Text>
+                        <Text style={styles.tableDataCol}>
+                          {typeof b.strikeRate === 'number' ? b.strikeRate.toFixed(1) : (b.balls ? ((b.runs * 100) / b.balls).toFixed(1) : '0.0')}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+
+                {/* Extras Summary */}
+                <View style={styles.extrasContainer}>
+                  <Text style={styles.extrasMainText}>
+                    Extras: <Text style={{ fontWeight: '800', color: Colors.textPrimary }}>{inn1.extras?.total || 0}</Text>
+                  </Text>
+                  <Text style={styles.extrasSubText}>
+                    (Wd: {inn1.extras?.wides || 0}, Nb: {inn1.extras?.noBalls || 0}, B: {inn1.extras?.byes || 0}, Lb: {inn1.extras?.legByes || 0})
                   </Text>
                 </View>
-                <Text style={styles.inningsTitle}>Bowling</Text>
-                <View style={styles.tableHeader}>
-                  <Text style={[styles.col, { flex: 2 }]}>Bowler</Text>
-                  <Text style={styles.col}>O</Text>
-                  <Text style={styles.col}>M</Text>
-                  <Text style={styles.col}>R</Text>
-                  <Text style={styles.col}>W</Text>
-                  <Text style={styles.col}>Eco</Text>
-                </View>
-                {(inn1.bowling && inn1.bowling.length > 0 ? inn1.bowling : []).map((bw: any, i: number) => (
-                  <View key={i} style={[styles.tableRow, i % 2 === 0 && styles.tableRowAlt]}>
-                    <Text style={[styles.col, { flex: 2, textAlign: 'left', color: match.playerOfMatch === bw.name ? Colors.primary : Colors.textPrimary }]}>
-                      {match.playerOfMatch === bw.name ? '⭐ ' : ''}{bw.name}
-                    </Text>
-                    <Text style={styles.col}>{bw.overs}</Text>
-                    <Text style={styles.col}>{bw.maidens || 0}</Text>
-                    <Text style={styles.col}>{bw.runs}</Text>
-                    <Text style={[styles.col, { color: Colors.accentPurple, fontWeight: '700' }]}>{bw.wickets}</Text>
-                    <Text style={styles.col}>{typeof bw.economy === 'number' ? bw.economy.toFixed(1) : '0.0'}</Text>
-                  </View>
-                ))}
-                {inn2 && (
-                  <View style={{ marginTop: Spacing.lg }}>
-                    <Text style={styles.inningsTitle}>{secondTeamName} Innings</Text>
-                    <View style={styles.tableHeader}>
-                      <Text style={[styles.col, { flex: 2 }]}>Batter</Text>
-                      <Text style={styles.col}>R</Text>
-                      <Text style={styles.col}>B</Text>
-                      <Text style={styles.col}>4s</Text>
-                      <Text style={styles.col}>6s</Text>
-                      <Text style={styles.col}>SR</Text>
+
+                {/* Bowling Table */}
+                <View style={styles.bowlingSection}>
+                  <Text style={styles.bowlingSectionTitle}>Bowling</Text>
+                  <View style={styles.tableCard}>
+                    <View style={styles.tableHeadRow}>
+                      <Text style={[styles.tableHeadCol, { flex: 2.2, textAlign: 'left', paddingLeft: 8 }]}>Bowler</Text>
+                      <Text style={styles.tableHeadCol}>O</Text>
+                      <Text style={styles.tableHeadCol}>M</Text>
+                      <Text style={styles.tableHeadCol}>R</Text>
+                      <Text style={[styles.tableHeadCol, { color: Colors.primary, fontWeight: '800' }]}>W</Text>
+                      <Text style={styles.tableHeadCol}>Eco</Text>
                     </View>
-                    {(inn2.batting || []).map((b: any, i: number) => (
-                      <View key={i} style={[styles.tableRow, i % 2 === 0 && styles.tableRowAlt]}>
-                        <View style={{ flex: 2 }}>
-                          <Text style={[styles.playerCell, match.playerOfMatch === b.name && { color: Colors.primary }]}>
-                            {match.playerOfMatch === b.name ? '⭐ ' : ''}{b.status === 'NOT_OUT' ? `${b.name}*` : b.name}
-                          </Text>
-                          {b.out && <Text style={styles.dismissal}>{b.out}</Text>}
-                          {!b.out && b.status === 'NOT_OUT' && <Text style={styles.dismissal}>not out</Text>}
-                        </View>
-                        <Text style={[styles.col, { fontWeight: '700', color: Colors.textPrimary }]}>{b.runs}</Text>
-                        <Text style={styles.col}>{b.balls}</Text>
-                        <Text style={styles.col}>{b.fours ?? 0}</Text>
-                        <Text style={styles.col}>{b.sixes ?? 0}</Text>
-                        <Text style={styles.col}>{typeof b.strikeRate === 'number' ? b.strikeRate.toFixed(1) : (b.balls ? ((b.runs * 100) / b.balls).toFixed(1) : '0.0')}</Text>
-                      </View>
-                    ))}
-                    <Text style={styles.inningsTitle}>Bowling</Text>
-                    {(inn2.bowling || []).map((bw: any, i: number) => (
-                      <View key={i} style={[styles.tableRow, i % 2 === 0 && styles.tableRowAlt]}>
-                        <Text style={[styles.col, { flex: 2, textAlign: 'left', color: match.playerOfMatch === bw.name ? Colors.primary : Colors.textPrimary }]}>
+
+                    {(inn1.bowling && inn1.bowling.length > 0 ? inn1.bowling : []).map((bw: any, i: number) => (
+                      <View key={i} style={[styles.tableDataRow, i % 2 === 1 && styles.tableDataRowAlt]}>
+                        <Text style={[styles.playerCellText, { flex: 2.2, paddingLeft: 8 }, match.playerOfMatch === bw.name && { color: Colors.primary }]}>
                           {match.playerOfMatch === bw.name ? '⭐ ' : ''}{bw.name}
                         </Text>
-                        <Text style={styles.col}>{bw.overs}</Text>
-                        <Text style={styles.col}>{bw.maidens || 0}</Text>
-                        <Text style={styles.col}>{bw.runs}</Text>
-                        <Text style={[styles.col, { color: Colors.accentPurple, fontWeight: '700' }]}>{bw.wickets}</Text>
-                        <Text style={styles.col}>{typeof bw.economy === 'number' ? bw.economy.toFixed(1) : '0.0'}</Text>
+                        <Text style={styles.tableDataCol}>{bw.overs}</Text>
+                        <Text style={styles.tableDataCol}>{bw.maidens || 0}</Text>
+                        <Text style={styles.tableDataCol}>{bw.runs}</Text>
+                        <Text style={[styles.tableDataCol, { color: Colors.primary, fontWeight: '900' }]}>{bw.wickets}</Text>
+                        <Text style={styles.tableDataCol}>{typeof bw.economy === 'number' ? bw.economy.toFixed(1) : '0.0'}</Text>
                       </View>
                     ))}
                   </View>
-                )}
+                </View>
               </View>
             )}
-          </>
+
+            {inn2 && (
+              <View style={styles.scorecardInningsCard}>
+                {/* Team Header */}
+                <View style={styles.scorecardInningsHeader}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.sm }}>
+                    <TeamLogoAvatar name={secondTeamName} shortName={secondTeamShort} logoURL={secondTeamLogo} size={36} />
+                    <Text style={styles.inningsHeaderName}>{secondTeamName} Innings</Text>
+                  </View>
+                  <View style={styles.inningsHeaderScorePill}>
+                    <Text style={styles.inningsHeaderScoreText}>
+                      {inn2.runs}/{inn2.wickets} ({inn2.overs}.{inn2.balls} ov)
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Batting Table */}
+                <View style={styles.tableCard}>
+                  <View style={styles.tableHeadRow}>
+                    <Text style={[styles.tableHeadCol, { flex: 2.2, textAlign: 'left', paddingLeft: 8 }]}>Batter</Text>
+                    <Text style={styles.tableHeadCol}>R</Text>
+                    <Text style={styles.tableHeadCol}>B</Text>
+                    <Text style={styles.tableHeadCol}>4s</Text>
+                    <Text style={styles.tableHeadCol}>6s</Text>
+                    <Text style={styles.tableHeadCol}>SR</Text>
+                  </View>
+
+                  {(inn2.batting || []).map((b: any, i: number) => {
+                    const isNotOut = !b.out && b.status === 'NOT_OUT';
+                    return (
+                      <View key={i} style={[styles.tableDataRow, i % 2 === 1 && styles.tableDataRowAlt]}>
+                        <View style={{ flex: 2.2, paddingLeft: 8 }}>
+                          <Text style={[styles.playerCellText, match.playerOfMatch === b.name && { color: Colors.primary }]}>
+                            {match.playerOfMatch === b.name ? '⭐ ' : ''}{b.name}{isNotOut ? '*' : ''}
+                          </Text>
+                          {b.out ? (
+                            <Text style={styles.dismissalText}>{b.out}</Text>
+                          ) : isNotOut ? (
+                            <Text style={styles.notOutBadge}>not out</Text>
+                          ) : null}
+                        </View>
+                        <Text style={[styles.tableDataCol, { fontWeight: '900', color: Colors.textPrimary }]}>{b.runs}</Text>
+                        <Text style={styles.tableDataCol}>{b.balls}</Text>
+                        <Text style={styles.tableDataCol}>{b.fours ?? 0}</Text>
+                        <Text style={styles.tableDataCol}>{b.sixes ?? 0}</Text>
+                        <Text style={styles.tableDataCol}>
+                          {typeof b.strikeRate === 'number' ? b.strikeRate.toFixed(1) : (b.balls ? ((b.runs * 100) / b.balls).toFixed(1) : '0.0')}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+
+                {/* Extras Summary */}
+                <View style={styles.extrasContainer}>
+                  <Text style={styles.extrasMainText}>
+                    Extras: <Text style={{ fontWeight: '800', color: Colors.textPrimary }}>{inn2.extras?.total || 0}</Text>
+                  </Text>
+                  <Text style={styles.extrasSubText}>
+                    (Wd: {inn2.extras?.wides || 0}, Nb: {inn2.extras?.noBalls || 0}, B: {inn2.extras?.byes || 0}, Lb: {inn2.extras?.legByes || 0})
+                  </Text>
+                </View>
+
+                {/* Bowling Table */}
+                <View style={styles.bowlingSection}>
+                  <Text style={styles.bowlingSectionTitle}>Bowling</Text>
+                  <View style={styles.tableCard}>
+                    <View style={styles.tableHeadRow}>
+                      <Text style={[styles.tableHeadCol, { flex: 2.2, textAlign: 'left', paddingLeft: 8 }]}>Bowler</Text>
+                      <Text style={styles.tableHeadCol}>O</Text>
+                      <Text style={styles.tableHeadCol}>M</Text>
+                      <Text style={styles.tableHeadCol}>R</Text>
+                      <Text style={[styles.tableHeadCol, { color: Colors.primary, fontWeight: '800' }]}>W</Text>
+                      <Text style={styles.tableHeadCol}>Eco</Text>
+                    </View>
+
+                    {(inn2.bowling || []).map((bw: any, i: number) => (
+                      <View key={i} style={[styles.tableDataRow, i % 2 === 1 && styles.tableDataRowAlt]}>
+                        <Text style={[styles.playerCellText, { flex: 2.2, paddingLeft: 8 }, match.playerOfMatch === bw.name && { color: Colors.primary }]}>
+                          {match.playerOfMatch === bw.name ? '⭐ ' : ''}{bw.name}
+                        </Text>
+                        <Text style={styles.tableDataCol}>{bw.overs}</Text>
+                        <Text style={styles.tableDataCol}>{bw.maidens || 0}</Text>
+                        <Text style={styles.tableDataCol}>{bw.runs}</Text>
+                        <Text style={[styles.tableDataCol, { color: Colors.primary, fontWeight: '900' }]}>{bw.wickets}</Text>
+                        <Text style={styles.tableDataCol}>{typeof bw.economy === 'number' ? bw.economy.toFixed(1) : '0.0'}</Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              </View>
+            )}
+          </View>
         )}
 
+        {/* COMMENTARY TAB */}
         {tab === 'Commentary' && (
-          <View>
+          <View style={styles.commentaryContainer}>
             <View style={styles.commentaryHeader}>
               <Text style={styles.commentaryHeaderTitle}>Ball-by-ball</Text>
               <TouchableOpacity onPress={speakScoreNow} style={styles.speakScoreChip}>
@@ -578,29 +875,27 @@ export default function MatchCenterScreen({ route, navigation }: any) {
               </TouchableOpacity>
             </View>
             {commentary.length === 0 ? (
-              <Text style={styles.dismissal}>
-                Commentary will appear here as each ball is scored.
-              </Text>
+              <Text style={styles.emptyNote}>Ball by ball commentary will appear as the match progresses.</Text>
             ) : (
-              commentary.slice().reverse().map((b, i) => (
-                <View key={`${b.over}.${b.ball}-${i}-${b.label}`} style={styles.commentaryRow}>
+              commentary.slice().reverse().map((b, idx) => (
+                <View key={idx} style={styles.commentaryCard}>
                   <View style={[styles.overBadge, {
                     backgroundColor: b.wicket
-                      ? Colors.loss + '33'
+                      ? '#FEE2E2'
                       : b.extra
-                        ? Colors.accentOrange + '22'
+                        ? '#FEF3C7'
                         : b.runs >= 4
-                          ? Colors.accentBlue + '22'
-                          : Colors.bgElevated,
+                          ? '#DBEAFE'
+                          : '#F1F5F9',
                   }]}>
                     <Text style={[styles.overBadgeText, {
                       color: b.wicket
-                        ? Colors.loss
+                        ? '#DC2626'
                         : b.extra
-                          ? Colors.accentOrange
+                          ? '#D97706'
                           : b.runs >= 4
-                            ? Colors.accentBlue
-                            : Colors.textSecondary,
+                            ? '#1D4ED8'
+                            : '#475569',
                     }]}>
                       {b.over}.{b.ball}
                     </Text>
@@ -620,87 +915,139 @@ export default function MatchCenterScreen({ route, navigation }: any) {
           </View>
         )}
 
+        {/* INSIGHTS TAB */}
         {tab === 'Insights' && (
-          <View>
-            <Text style={styles.inningsTitle}>Partnerships</Text>
-            {inn1Analytics.partnerships.map(p => (
-              <Text key={`p1-${p.wicket}`} style={styles.dismissal}>{p.wicket}. {p.batterA} & {p.batterB} · {p.runs} ({p.balls})</Text>
-            ))}
-            <Text style={styles.inningsTitle}>Fall of wickets</Text>
-            {inn1Analytics.fow.map(f => (
-              <Text key={`f1-${f.wicket}`} style={styles.dismissal}>{f.score}/{f.wicket} · {f.batter} · {f.overs} ov</Text>
-            ))}
-            {inn2 && inn2Analytics.fow.length > 0 && inn2Analytics.fow.map(f => (
-              <Text key={`f2-${f.wicket}`} style={styles.dismissal}>2nd: {f.score}/{f.wicket} · {f.batter}</Text>
-            ))}
-            <Text style={styles.inningsTitle}>Wagon wheel</Text>
-            {wagon.filter(z => z.count > 0).length === 0 && <Text style={styles.dismissal}>Tap shot location while scoring to fill the wagon wheel.</Text>}
-            <View style={styles.wagonRing}>
-              {wagon.filter(z => z.count > 0).map((z, idx) => {
-                const maxRuns = Math.max(1, ...wagon.map(w => w.runs));
-                const intensity = 0.25 + 0.75 * (z.runs / maxRuns);
-                return (
-                  <View
-                    key={z.zone}
-                    style={[
-                      styles.wagonSeg,
-                      {
-                        backgroundColor: `rgba(255,109,0,${intensity.toFixed(2)})`,
-                        transform: [{ rotate: `${idx * 40}deg` }],
-                      },
-                    ]}>
-                    <Text style={styles.wagonSegText}>{z.zone.slice(0, 3)}</Text>
-                    <Text style={styles.wagonSegVal}>{z.runs}</Text>
-                  </View>
-                );
-              })}
+          <View style={{ gap: Spacing.md }}>
+            <View style={styles.insightsCard}>
+              <Text style={styles.insightsTitle}>Partnerships</Text>
+              {inn1Analytics.partnerships.length === 0 && inn2Analytics.partnerships.length === 0 ? (
+                <Text style={styles.emptyNote}>No partnerships recorded yet.</Text>
+              ) : (
+                <>
+                  {inn1Analytics.partnerships.map((p, idx) => (
+                    <Text key={`p1-${p.wicket}-${idx}-${p.batterA}`} style={styles.insightLine}>
+                      {p.wicket}. {p.batterA} & {p.batterB} · <Text style={{ fontWeight: '800', color: Colors.primary }}>{p.runs}</Text> ({p.balls}b)
+                    </Text>
+                  ))}
+                  {inn2Analytics.partnerships.length > 0 && (
+                    <>
+                      <Text style={[styles.insightsTitle, { fontSize: 13, marginTop: 10 }]}>{secondTeamName} Partnerships</Text>
+                      {inn2Analytics.partnerships.map((p, idx) => (
+                        <Text key={`p2-${p.wicket}-${idx}-${p.batterA}`} style={styles.insightLine}>
+                          {p.wicket}. {p.batterA} & {p.batterB} · <Text style={{ fontWeight: '800', color: Colors.primary }}>{p.runs}</Text> ({p.balls}b)
+                        </Text>
+                      ))}
+                    </>
+                  )}
+                </>
+              )}
             </View>
-            {wagon.filter(z => z.count > 0).map(z => (
-              <View key={`bar-${z.zone}`} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                <Text style={{ width: 90, color: Colors.textSecondary, fontSize: 11 }}>{z.zone}</Text>
-                <View style={{ flex: 1, height: 10, backgroundColor: Colors.bgElevated, borderRadius: 5, overflow: 'hidden' }}>
-                  <View style={{ width: `${Math.min(100, z.runs * 8)}%` as any, height: 10, backgroundColor: Colors.primary, borderRadius: 5 }} />
-                </View>
-                <Text style={{ width: 50, textAlign: 'right', color: Colors.textPrimary, fontSize: 11 }}>{z.runs} ({z.count})</Text>
-              </View>
-            ))}
-            <Text style={styles.inningsTitle}>Over comparison</Text>
-            {overBuckets.map(o => (
-              <View key={o.over} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
-                <Text style={{ width: 36, color: Colors.textSecondary, fontSize: 11 }}>Ov {o.over}</Text>
-                <View style={{ flex: 1, height: 10, backgroundColor: Colors.bgElevated, borderRadius: 5, overflow: 'hidden' }}>
-                  <View style={{ width: `${Math.min(100, o.runs * 8)}%` as any, height: 10, backgroundColor: o.wickets ? Colors.loss : Colors.accentBlue, borderRadius: 5 }} />
-                </View>
-                <Text style={{ width: 48, textAlign: 'right', color: Colors.textPrimary, fontSize: 11 }}>{o.runs}{o.wickets ? `/${o.wickets}` : ''}</Text>
-              </View>
-            ))}
-            <Text style={styles.inningsTitle}>Runs comparison</Text>
-            <View style={styles.runCurveRow}>
-              {runCurve.map((total, i) => {
-                const max = Math.max(1, ...runCurve);
-                const h = Math.max(4, Math.round((total / max) * 72));
-                return (
-                  <View key={`c-${i}`} style={styles.runCurveCol}>
-                    <View style={[styles.runCurveBar, { height: h }]} />
-                    <Text style={styles.runCurveLabel}>{i + 1}</Text>
-                  </View>
-                );
-              })}
+
+            <View style={styles.insightsCard}>
+              <Text style={styles.insightsTitle}>Fall of Wickets</Text>
+              {inn1Analytics.fow.length === 0 && inn2Analytics.fow.length === 0 ? (
+                <Text style={styles.emptyNote}>No wickets fallen yet.</Text>
+              ) : (
+                <>
+                  {inn1Analytics.fow.map((f, idx) => (
+                    <Text key={`f1-${f.wicket}-${idx}-${f.batter}`} style={styles.insightLine}>
+                      {f.score}/{f.wicket} · {f.batter} ({f.overs} ov)
+                    </Text>
+                  ))}
+                  {inn2Analytics.fow.length > 0 && (
+                    <>
+                      <Text style={[styles.insightsTitle, { fontSize: 13, marginTop: 10 }]}>{secondTeamName} Fall of Wickets</Text>
+                      {inn2Analytics.fow.map((f, idx) => (
+                        <Text key={`f2-${f.wicket}-${idx}-${f.batter}`} style={styles.insightLine}>
+                          {f.score}/{f.wicket} · {f.batter} ({f.overs} ov)
+                        </Text>
+                      ))}
+                    </>
+                  )}
+                </>
+              )}
             </View>
-            {runCurve.map((total, i) => (
-              <Text key={`ct-${i}`} style={styles.dismissal}>After {i + 1} ov: {total} runs</Text>
-            ))}
+
+            <View style={styles.insightsCard}>
+              <Text style={styles.insightsTitle}>Wagon Wheel</Text>
+              {wagon.filter(z => z.count > 0).length === 0 ? (
+                <Text style={styles.emptyNote}>Tap shot location while scoring to fill the wagon wheel.</Text>
+              ) : (
+                <>
+                  <View style={styles.wagonRing}>
+                    {wagon.filter(z => z.count > 0).map((z, idx) => {
+                      const maxRuns = Math.max(1, ...wagon.map(w => w.runs));
+                      const intensity = 0.25 + 0.75 * (z.runs / maxRuns);
+                      return (
+                        <View
+                          key={z.zone}
+                          style={[
+                            styles.wagonSeg,
+                            {
+                              backgroundColor: `rgba(196,26,59,${intensity.toFixed(2)})`,
+                              transform: [{ rotate: `${idx * 40}deg` }],
+                            },
+                          ]}>
+                          <Text style={styles.wagonSegText}>{z.zone.slice(0, 3)}</Text>
+                          <Text style={styles.wagonSegVal}>{z.runs}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                  {wagon.filter(z => z.count > 0).map(z => (
+                    <View key={`bar-${z.zone}`} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                      <Text style={{ width: 90, color: Colors.textSecondary, fontSize: 11 }}>{z.zone}</Text>
+                      <View style={{ flex: 1, height: 10, backgroundColor: Colors.bgElevated, borderRadius: 5, overflow: 'hidden' }}>
+                        <View style={{ width: `${Math.min(100, z.runs * 8)}%` as any, height: 10, backgroundColor: Colors.primary, borderRadius: 5 }} />
+                      </View>
+                      <Text style={{ width: 50, textAlign: 'right', color: Colors.textPrimary, fontSize: 11, fontWeight: '700' }}>{z.runs} ({z.count})</Text>
+                    </View>
+                  ))}
+                </>
+              )}
+            </View>
+
+            <View style={styles.insightsCard}>
+              <Text style={styles.insightsTitle}>Over Comparison</Text>
+              {overBuckets.length === 0 ? (
+                <Text style={styles.emptyNote}>No overs scored yet.</Text>
+              ) : (
+                overBuckets.map(o => (
+                  <View key={o.over} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                    <Text style={{ width: 44, color: Colors.textSecondary, fontSize: 11 }}>Ov {o.over}</Text>
+                    <View style={{ flex: 1, height: 10, backgroundColor: Colors.bgElevated, borderRadius: 5, overflow: 'hidden' }}>
+                      <View style={{ width: `${Math.min(100, o.runs * 8)}%` as any, height: 10, backgroundColor: o.wickets ? Colors.loss : Colors.accentBlue, borderRadius: 5 }} />
+                    </View>
+                    <Text style={{ width: 52, textAlign: 'right', color: Colors.textPrimary, fontSize: 11, fontWeight: '800' }}>
+                      {o.runs}{o.wickets ? `/${o.wickets}` : ''}
+                    </Text>
+                  </View>
+                ))
+              )}
+            </View>
           </View>
         )}
 
+        {/* INFO TAB */}
         {tab === 'Info' && (
-          <LinearGradient colors={Colors.gradCard} style={styles.infoCard}>
+          <View style={styles.infoContainerCard}>
             {[
               { label: 'Venue', value: match.venue },
-              { label: 'Date', value: new Date(match.dateTime).toLocaleDateString('en-PK', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) },
-              { label: 'Overs', value: match.dls?.applied
-                ? `${match.overs} scheduled · DLS ${match.dls.team1Overs}/${match.dls.team2Overs} ov`
-                : `${match.overs} Overs` },
+              {
+                label: 'Date',
+                value: new Date(match.dateTime).toLocaleDateString('en-PK', {
+                  weekday: 'long',
+                  day: 'numeric',
+                  month: 'long',
+                  year: 'numeric',
+                }),
+              },
+              {
+                label: 'Overs',
+                value: match.dls?.applied
+                  ? `${match.overs} scheduled · DLS ${match.dls.team1Overs}/${match.dls.team2Overs} ov`
+                  : `${match.overs} Overs`,
+              },
               ...(match.dls?.applied && match.dls.revisedTarget != null
                 ? [{ label: 'DLS Target', value: `${match.dls.revisedTarget} runs` }]
                 : []),
@@ -712,202 +1059,873 @@ export default function MatchCenterScreen({ route, navigation }: any) {
               { label: 'Player of the Match', value: match.playerOfMatch || 'TBD' },
               { label: 'Result', value: match.result || 'TBD' },
             ].map((row, i, rows) => (
-              <View key={i} style={[styles.infoRow, i < rows.length - 1 && { borderBottomWidth: 1, borderBottomColor: Colors.border }]}>
+              <View key={i} style={[styles.infoRow, i < rows.length - 1 && { borderBottomWidth: 1, borderBottomColor: Colors.borderLight }]}>
                 <Text style={styles.infoLabel}>{row.label}</Text>
                 <Text style={[styles.infoValue, row.label === 'Player of the Match' && match.playerOfMatch ? { color: Colors.primary, fontWeight: '800' } : null]}>
                   {row.label === 'Player of the Match' && match.playerOfMatch ? `⭐ ${row.value}` : row.value}
                 </Text>
               </View>
             ))}
-          </LinearGradient>
+          </View>
         )}
-      </ScrollView>
-    </View>
-  );
+      </View>
+    </ScrollView>
+    <PremiumGoLiveModal
+      visible={showGoLivePremiumModal}
+      onClose={() => setShowGoLivePremiumModal(false)}
+    />
+  </View>
+);
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  hero: { paddingTop: 60, paddingBottom: Spacing.base, paddingHorizontal: Spacing.base },
-  topRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.sm },
-  backBtn: {},
-  voiceRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
-  overlayBtn: {
-    paddingHorizontal: 10,
-    height: 34,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: Colors.primary + '18',
-    borderWidth: 1,
-    borderColor: Colors.primary + '66',
+  container: { flex: 1, backgroundColor: '#F8FAFC' },
+  
+  // Hero Container
+  hero: {
+    paddingTop: Platform.OS === 'ios' ? 54 : 46,
+    paddingBottom: Spacing.lg,
+    paddingHorizontal: Spacing.base,
+    borderBottomLeftRadius: 32,
+    borderBottomRightRadius: 32,
+    ...Shadow.lg,
   },
-  overlayBtnText: { color: Colors.primary, fontWeight: '800', fontSize: 11 },
-  voiceBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: Colors.bgElevated,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  voiceBtnOnDark: {
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    borderColor: 'rgba(255,255,255,0.35)',
-  },
-  voiceToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: Radius.full,
-    backgroundColor: Colors.bgElevated,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  voiceToggleOn: {
-    backgroundColor: Colors.primary + '18',
-    borderColor: Colors.primary + '66',
-  },
-  voiceToggleText: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: Colors.textSecondary,
-    letterSpacing: 0.8,
-  },
-  liveRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginBottom: Spacing.md },
-  liveBadge: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: Spacing.sm, paddingVertical: 4, borderRadius: Radius.full, gap: 4 },
-  liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#fff' },
-  liveText: { fontSize: Typography.xs, fontWeight: '800', color: '#fff', letterSpacing: 1 },
-  matchNumText: { fontSize: Typography.sm, color: Colors.textSecondary },
-  scoreBlock: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: Spacing.sm },
-  teamScoreBlock: { flex: 1 },
-  teamNameHero: { fontSize: Typography.sm, color: Colors.textSecondary, fontWeight: '700', marginBottom: 4 },
-  bigScore: { fontSize: Typography.xxxl, fontWeight: '900', color: Colors.textPrimary },
-  oversText: { fontSize: Typography.sm, color: Colors.textSecondary, marginTop: 2, fontWeight: '600' },
-  yetToBat: { fontSize: Typography.sm, color: Colors.textMuted, marginTop: 8 },
-  vsSep: { paddingHorizontal: Spacing.md, alignItems: 'center', marginTop: Spacing.xl },
-  vsHero: { fontSize: Typography.sm, color: Colors.textMuted, fontWeight: '700' },
-  crrText: { fontSize: Typography.xs, color: Colors.primary, textAlign: 'center', marginTop: 4 },
-  needRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: Spacing.sm, borderRadius: Radius.md, marginBottom: Spacing.sm },
-  needText: { fontSize: Typography.sm, color: Colors.textPrimary, fontWeight: '600' },
-  rrrText: { fontSize: Typography.sm, color: Colors.accentOrange, fontWeight: '700' },
-  currentPlayers: { marginBottom: Spacing.sm },
-  batsmenRow: { flexDirection: 'row', gap: Spacing.sm },
-  batsmanCard: { flex: 1, backgroundColor: Colors.bgElevated, padding: Spacing.sm, borderRadius: Radius.md },
-  bowlerCard: { flex: 1, backgroundColor: Colors.bgElevated + '88', padding: Spacing.sm, borderRadius: Radius.md, borderWidth: 1, borderColor: Colors.accentPurple + '44' },
-  batsmanLabel: { fontSize: Typography.xs, color: Colors.textSecondary, marginBottom: 2 },
-  batsmanScore: { fontSize: Typography.sm, fontWeight: '700', color: Colors.textPrimary },
-  lastBalls: { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs, marginBottom: Spacing.sm },
-  overLabel: { fontSize: Typography.xs, color: Colors.textSecondary },
-  ballPill: { width: 28, height: 28, borderRadius: 14, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
-  ballPillText: { fontSize: Typography.xs, fontWeight: '800' },
-  resultBanner: { backgroundColor: Colors.primary + '22', padding: Spacing.sm, borderRadius: Radius.md, marginBottom: Spacing.sm, borderWidth: 1, borderColor: Colors.primary + '44' },
-  resultBannerOnDark: {
-    backgroundColor: 'rgba(255,255,255,0.16)',
-    borderColor: 'rgba(255,255,255,0.35)',
-  },
-  resultText: { fontSize: Typography.sm, color: Colors.primary, fontWeight: '700', textAlign: 'center' },
-  tossText: { fontSize: Typography.xs, color: Colors.textSecondary, fontWeight: '600' },
-  tabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: Colors.border, backgroundColor: Colors.bgCard },
-  tab: { flex: 1, alignItems: 'center', paddingVertical: Spacing.md, position: 'relative' },
-  tabActive: {},
-  tabText: { fontSize: Typography.sm, fontWeight: '600', color: Colors.textSecondary },
-  tabBar: { position: 'absolute', bottom: 0, left: '20%', right: '20%', height: 2, backgroundColor: Colors.primary, borderRadius: 1 },
-  summaryInnings: { paddingBottom: Spacing.lg, marginBottom: Spacing.base, borderBottomWidth: 1, borderBottomColor: Colors.border },
-  summaryTitleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: Spacing.md, gap: Spacing.sm },
-  summaryTeam: { flex: 1, fontSize: Typography.lg, color: Colors.primary, fontWeight: '800', textTransform: 'uppercase' },
-  summaryScore: { fontSize: Typography.lg, color: Colors.primary, fontWeight: '900' },
-  summaryLegend: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: Spacing.sm, paddingHorizontal: 28 },
-  summaryLegendText: { fontSize: Typography.xs, color: Colors.textMuted, fontWeight: '700', letterSpacing: 0.4 },
-  summaryLine: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, gap: 4 },
-  summaryRank: { width: 18, fontSize: Typography.xs, color: Colors.primary, fontWeight: '800' },
-  summaryName: { flex: 1.35, fontSize: Typography.sm, color: Colors.textSecondary, fontWeight: '600' },
-  summaryFigure: { width: 52, fontSize: Typography.sm, color: Colors.textPrimary, fontWeight: '800', textAlign: 'right' },
-  winnerCard: { marginTop: Spacing.sm, backgroundColor: Colors.primary + '16', borderRadius: Radius.lg, borderWidth: 1, borderColor: Colors.primary + '55', padding: Spacing.base },
-  winnerLabel: { fontSize: Typography.xs, color: Colors.textSecondary, fontWeight: '800', letterSpacing: 1 },
-  winnerResult: { fontSize: Typography.lg, color: Colors.textPrimary, fontWeight: '900', marginTop: Spacing.xs },
-  pomRow: { marginTop: Spacing.md, paddingTop: Spacing.md, borderTopWidth: 1, borderTopColor: Colors.primary + '33' },
-  pomLabel: { fontSize: Typography.xs, color: Colors.textSecondary, fontWeight: '800', letterSpacing: 1 },
-  playerOfMatch: { fontSize: Typography.base, color: Colors.primary, fontWeight: '800', marginTop: 4 },
-  inningsTitle: { fontSize: Typography.base, fontWeight: '800', color: Colors.textPrimary, marginBottom: Spacing.sm, marginTop: Spacing.base },
-  tableHeader: { flexDirection: 'row', backgroundColor: Colors.bgCard, paddingVertical: Spacing.sm, paddingHorizontal: Spacing.xs, borderRadius: Radius.sm, marginBottom: 2 },
-  col: { flex: 1, fontSize: Typography.xs, color: Colors.textSecondary, textAlign: 'center', fontWeight: '600' },
-  tableRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: Spacing.sm, paddingHorizontal: Spacing.xs, borderRadius: Radius.sm },
-  tableRowAlt: { backgroundColor: Colors.bgCard },
-  playerCell: { fontSize: Typography.sm, color: Colors.textPrimary, fontWeight: '600' },
-  dismissal: { fontSize: Typography.xs, color: Colors.textMuted, marginTop: 1 },
-  extraRow: { paddingVertical: Spacing.sm },
-  extraText: { fontSize: Typography.xs, color: Colors.textSecondary },
-  commentaryHeader: {
+  topRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: Spacing.sm,
   },
-  commentaryHeaderTitle: { fontSize: Typography.base, fontWeight: '800', color: Colors.textPrimary },
+  backCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  overlayBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    height: 34,
+    borderRadius: Radius.full,
+    justifyContent: 'center',
+    backgroundColor: 'rgba(239, 68, 68, 0.3)',
+    borderWidth: 1,
+    borderColor: '#EF4444',
+  },
+  broadcastDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#EF4444',
+  },
+  overlayBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 11 },
+  actionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    height: 34,
+    borderRadius: Radius.full,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  actionPillText: { color: '#FFFFFF', fontWeight: '800', fontSize: 11 },
+  iconCircleBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  voiceToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    height: 34,
+    borderRadius: Radius.full,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  voiceToggleOn: {
+    backgroundColor: 'rgba(16, 185, 129, 0.25)',
+    borderColor: '#10B981',
+  },
+  voiceToggleText: { color: '#FFFFFF', fontWeight: '800', fontSize: 10, letterSpacing: 0.5 },
+
+  // Live Meta Row
+  liveMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: Spacing.md,
+    flexWrap: 'wrap',
+  },
+  liveBadgeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#EF4444',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.full,
+    shadowColor: '#EF4444',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  liveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#FFFFFF',
+  },
+  liveBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+  },
+  matchPillBadge: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+  },
+  matchPillText: {
+    color: '#E2E8F0',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  oversPillBadge: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: Radius.full,
+  },
+  oversPillText: {
+    color: '#94A3B8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  clubPillBadge: {
+    backgroundColor: 'rgba(196,26,59,0.2)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: 'rgba(196,26,59,0.4)',
+    maxWidth: 130,
+  },
+  clubPillText: {
+    color: '#FDA4AF',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+
+  // Match Hero Main Card with Glowing Team Logos
+  matchHeroCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderRadius: 24,
+    paddingVertical: Spacing.base,
+    paddingHorizontal: Spacing.md,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    marginBottom: Spacing.sm,
+  },
+  teamHeroCol: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  teamLogoWrapper: {
+    padding: 3,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderRadius: 36,
+    marginBottom: 8,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.28)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    elevation: 5,
+  },
+  teamNameText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    textAlign: 'center',
+    marginBottom: 4,
+    paddingHorizontal: 2,
+  },
+  scoreContainer: {
+    alignItems: 'center',
+  },
+  scoreLargeText: {
+    fontSize: 26,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: -0.5,
+  },
+  oversSmallText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#94A3B8',
+    marginTop: 1,
+  },
+  yetToBatPill: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: Radius.full,
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  yetToBatText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#CBD5E1',
+  },
+  midHeroCol: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  vsCircle: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.24)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+  },
+  vsText: {
+    fontSize: 11,
+    fontWeight: '900',
+    color: '#F8FAFC',
+    letterSpacing: 1,
+  },
+  crrContainer: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(196, 26, 59, 0.4)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.7)',
+  },
+  crrLabel: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#FDA4AF',
+    letterSpacing: 0.5,
+  },
+  crrNumber: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+
+  // Target Banner
+  targetBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 8,
+    borderRadius: Radius.md,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    marginBottom: Spacing.sm,
+  },
+  targetBannerText: {
+    fontSize: 12,
+    color: '#E2E8F0',
+    fontWeight: '600',
+  },
+  rrrBadge: {
+    backgroundColor: '#F59E0B',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  rrrBadgeText: {
+    color: '#000000',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+
+  // Live Players Grid
+  livePlayersGrid: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: Spacing.sm,
+  },
+  playerCard: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 14,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  strikerCard: {
+    backgroundColor: 'rgba(196, 26, 59, 0.22)',
+    borderColor: 'rgba(239, 68, 68, 0.55)',
+  },
+  bowlerCard: {
+    backgroundColor: 'rgba(59, 130, 246, 0.16)',
+    borderColor: 'rgba(59, 130, 246, 0.45)',
+  },
+  playerCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 4,
+  },
+  strikerDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#EF4444',
+  },
+  playerRoleText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#94A3B8',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  playerNameText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    marginBottom: 2,
+  },
+  playerScoreHighlight: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+  playerBallsSub: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#94A3B8',
+  },
+  playerSubStat: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+
+  // Over Ball Trail
+  overTrailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 2,
+    marginBottom: 4,
+  },
+  overTrailLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#CBD5E1',
+  },
+  ballPillList: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  ballPill: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ballPillText: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+
+  // Result & Toss
+  resultBannerHero: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    marginTop: 6,
+  },
+  resultBannerTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    textAlign: 'center',
+  },
+  resultBannerSub: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#E2E8F0',
+    textAlign: 'center',
+    marginTop: 3,
+  },
+  tossRow: {
+    marginTop: 8,
+    alignItems: 'center',
+  },
+  tossText: {
+    fontSize: 11,
+    color: '#94A3B8',
+    fontWeight: '600',
+  },
+
+  // Horizontal Tab Navigation Bar
+  tabsContainer: {
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+    paddingVertical: 10,
+    ...Shadow.sm,
+  },
+  tabsScrollContent: {
+    paddingHorizontal: Spacing.base,
+    gap: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  tabPillBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: Radius.full,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  tabPillBtnActive: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+    ...Shadow.sm,
+  },
+  tabPillLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  tabPillLabelActive: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+  },
+
+  // Scorecard Screen Styles
+  scorecardInningsCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: Spacing.base,
+    ...Shadow.sm,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  scorecardInningsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.md,
+  },
+  inningsHeaderName: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: Colors.textPrimary,
+  },
+  inningsHeaderScorePill: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: Radius.full,
+  },
+  inningsHeaderScoreText: {
+    fontSize: 13,
+    fontWeight: '900',
+    color: Colors.primary,
+  },
+
+  // Table Card
+  tableCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  tableHeadRow: {
+    flexDirection: 'row',
+    backgroundColor: '#F1F5F9',
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+  },
+  tableHeadCol: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#64748B',
+    textAlign: 'center',
+  },
+  tableDataRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  tableDataRowAlt: {
+    backgroundColor: '#FFFFFF',
+  },
+  tableDataCol: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: Colors.textPrimary,
+    textAlign: 'center',
+  },
+  playerCellText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: Colors.textPrimary,
+  },
+  dismissalText: {
+    fontSize: 10,
+    color: '#94A3B8',
+    marginTop: 1,
+  },
+  notOutBadge: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#10B981',
+    marginTop: 1,
+  },
+
+  // Extras
+  extrasContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: 4,
+  },
+  extrasMainText: {
+    fontSize: 12,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  extrasSubText: {
+    fontSize: 11,
+    color: '#94A3B8',
+  },
+
+  // Bowling
+  bowlingSection: {
+    marginTop: Spacing.md,
+  },
+  bowlingSectionTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: Colors.textPrimary,
+    marginBottom: Spacing.sm,
+  },
+
+  // Summary Tab Styles
+  summaryResultCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: Spacing.base,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    ...Shadow.sm,
+  },
+  summaryResultHeading: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: Colors.primary,
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  summaryResultTitle: {
+    fontSize: 17,
+    fontWeight: '900',
+    color: Colors.textPrimary,
+  },
+  pomContainer: {
+    marginTop: Spacing.sm,
+    paddingTop: Spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  pomHeading: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#94A3B8',
+    letterSpacing: 0.8,
+  },
+  pomName: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: Colors.primary,
+    marginTop: 2,
+  },
+  summaryCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: Spacing.base,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    ...Shadow.sm,
+  },
+  summaryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  summaryTeamTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: Colors.textPrimary,
+  },
+  summaryScoreBadge: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.full,
+  },
+  summaryScoreText: {
+    fontSize: 13,
+    fontWeight: '900',
+    color: Colors.primary,
+  },
+  summaryDivider: {
+    height: 1,
+    backgroundColor: '#F1F5F9',
+    marginVertical: Spacing.sm,
+  },
+  summaryStatRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 5,
+    gap: 4,
+  },
+  summaryRankNum: {
+    width: 16,
+    fontSize: 11,
+    fontWeight: '800',
+    color: Colors.primary,
+  },
+  summaryBatterText: {
+    flex: 1.4,
+    fontSize: 12,
+    fontWeight: '700',
+    color: Colors.textPrimary,
+  },
+  summaryBowlerText: {
+    flex: 1.4,
+    fontSize: 12,
+    fontWeight: '700',
+    color: Colors.textPrimary,
+  },
+  summaryStatFigure: {
+    width: 52,
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#475569',
+    textAlign: 'right',
+  },
+  summaryVerticalDivider: {
+    width: 1,
+    height: 16,
+    backgroundColor: '#E2E8F0',
+    marginHorizontal: 4,
+  },
+  superStarLine: {
+    fontSize: 13,
+    color: Colors.textSecondary,
+    marginTop: 6,
+    fontWeight: '600',
+  },
+
+  // Commentary Styles
+  commentaryContainer: {
+    gap: Spacing.sm,
+  },
+  commentaryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.xs,
+  },
+  commentaryHeaderTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: Colors.textPrimary,
+  },
   speakScoreChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: Radius.full,
-    backgroundColor: Colors.primary + '18',
+    backgroundColor: '#FEE2E2',
     borderWidth: 1,
-    borderColor: Colors.primary + '44',
+    borderColor: '#FCA5A5',
   },
-  speakScoreText: { fontSize: Typography.xs, fontWeight: '800', color: Colors.primary },
-  commentaryRow: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.sm, paddingVertical: Spacing.md, borderBottomWidth: 1, borderBottomColor: Colors.border },
-  overBadge: { width: 40, height: 40, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
-  overBadgeText: { fontSize: Typography.xs, fontWeight: '800' },
-  commentaryMeta: { fontSize: Typography.xs, color: Colors.textSecondary, marginBottom: 2 },
-  commentaryDesc: { fontSize: Typography.sm, color: Colors.textPrimary },
-  infoCard: { borderRadius: Radius.lg, padding: Spacing.base, borderWidth: 1, borderColor: Colors.border },
-  infoRow: { paddingVertical: Spacing.md },
-  infoLabel: { fontSize: Typography.xs, color: Colors.textSecondary, marginBottom: 4 },
-  infoValue: { fontSize: Typography.sm, fontWeight: '600', color: Colors.textPrimary },
+  speakScoreText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: Colors.primary,
+  },
+  commentaryCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.sm,
+    padding: Spacing.md,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  overBadge: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  overBadgeText: {
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  commentaryMeta: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  commentaryDesc: {
+    fontSize: 13,
+    color: Colors.textPrimary,
+    lineHeight: 18,
+  },
+
+  // Insights Styles
+  insightsCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: Spacing.base,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    ...Shadow.sm,
+  },
+  insightsTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: Colors.textPrimary,
+    marginBottom: Spacing.sm,
+  },
+  insightLine: {
+    fontSize: 13,
+    color: Colors.textSecondary,
+    marginBottom: 6,
+    fontWeight: '600',
+  },
   wagonRing: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'center',
     gap: 8,
-    marginBottom: Spacing.md,
+    marginVertical: Spacing.sm,
     padding: Spacing.md,
-    backgroundColor: Colors.bgElevated,
-    borderRadius: Radius.lg,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: Colors.border,
+    borderColor: '#E2E8F0',
   },
   wagonSeg: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: Colors.primary + '55',
   },
-  wagonSegText: { color: Colors.textPrimary, fontSize: 9, fontWeight: '800' },
-  wagonSegVal: { color: Colors.textPrimary, fontSize: 12, fontWeight: '900' },
-  runCurveRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 4,
-    height: 88,
-    marginBottom: Spacing.sm,
-    paddingHorizontal: 4,
+  wagonSegText: {
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: '800',
   },
-  runCurveCol: { flex: 1, alignItems: 'center', justifyContent: 'flex-end' },
-  runCurveBar: {
-    width: '80%',
-    backgroundColor: Colors.accentBlue,
-    borderTopLeftRadius: 4,
-    borderTopRightRadius: 4,
-    minHeight: 4,
+  wagonSegVal: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '900',
   },
-  runCurveLabel: { fontSize: 9, color: Colors.textMuted, marginTop: 2 },
+
+  // Info Tab Styles
+  infoContainerCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: Spacing.base,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    ...Shadow.sm,
+  },
+  infoRow: {
+    paddingVertical: Spacing.md,
+  },
+  infoLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+    marginBottom: 3,
+  },
+  infoValue: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: Colors.textPrimary,
+  },
+  emptyNote: {
+    fontSize: 12,
+    color: '#94A3B8',
+    fontStyle: 'italic',
+    paddingVertical: 6,
+  },
 });
