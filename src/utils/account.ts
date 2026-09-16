@@ -1,4 +1,4 @@
-import { Club, Match, User } from '../types';
+import { Club, Match, Team, User } from '../types';
 
 export function startOfLocalDay(value: number | Date): number {
   const d = new Date(value);
@@ -69,21 +69,58 @@ export function isMatchStarter(
   return !!match.createdBy && match.createdBy === user.id;
 }
 
-/** Match belongs to this user (or legacy club staff if createdBy is missing). */
+/** Match belongs to this user (created by user, or legacy club match where user is staff if createdBy is missing). */
 export function isUsersOwnMatch(
   user: User | null | undefined,
   match: Match | null | undefined,
   clubs: Club[] = [],
 ): boolean {
   if (!user || !match) return false;
-  if (user.role === 'superadmin') return true;
   if (match.createdBy) return match.createdBy === user.id;
-  const club = clubs.find(c => c.id === match.clubId);
-  if (club) return isClubStaff(user, club);
-  return (
-    (user.clubIds || []).includes(match.clubId) ||
-    user.currentClubId === match.clubId
-  );
+  if (match.clubId) {
+    const club = clubs.find(c => c.id === match.clubId);
+    if (club) {
+      const email = user.email?.toLowerCase();
+      return (
+        club.ownerId === user.id ||
+        (club.adminIds || []).includes(user.id) ||
+        (!!email && (club.adminEmails || []).includes(email)) ||
+        (user.clubIds || []).includes(club.id)
+      );
+    }
+    return (
+      (user.clubIds || []).includes(match.clubId) ||
+      (!!user.currentClubId && user.currentClubId === match.clubId)
+    );
+  }
+  return false;
+}
+
+/** Team belongs to this user (created by user, or legacy club team where user is staff if createdBy is missing). */
+export function isUsersOwnTeam(
+  user: User | null | undefined,
+  team: Team | null | undefined,
+  clubs: Club[] = [],
+): boolean {
+  if (!user || !team) return false;
+  if (team.createdBy) return team.createdBy === user.id;
+  if (team.clubId) {
+    const club = clubs.find(c => c.id === team.clubId);
+    if (club) {
+      const email = user.email?.toLowerCase();
+      return (
+        club.ownerId === user.id ||
+        (club.adminIds || []).includes(user.id) ||
+        (!!email && (club.adminEmails || []).includes(email)) ||
+        (user.clubIds || []).includes(club.id)
+      );
+    }
+    return (
+      (user.clubIds || []).includes(team.clubId) ||
+      (!!user.currentClubId && user.currentClubId === team.clubId)
+    );
+  }
+  return false;
 }
 
 /**
@@ -93,13 +130,12 @@ export function isUsersOwnMatch(
 export function canUserGoLiveOnMatch(
   user: User | null | undefined,
   match: Match | null | undefined,
-  _clubs: Club[] = [],
+  clubs: Club[] = [],
   now = Date.now(),
 ): boolean {
   if (!user || !match) return false;
   if (!canUserGoLive(user, now)) return false;
-  if (user.role === 'superadmin') return true;
-  return isMatchStarter(user, match);
+  return isMatchStarter(user, match) || isUsersOwnMatch(user, match, clubs);
 }
 
 export function goLiveWindowLabel(user: User | null | undefined, now = Date.now()): string {

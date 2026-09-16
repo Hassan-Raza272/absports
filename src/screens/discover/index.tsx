@@ -66,7 +66,7 @@ export default function DiscoverScreen({ navigation, route }: any) {
 
   function openTournament(tournament: Tournament) {
     selectClub(tournament.clubId, tournament.id);
-    navigation.navigate('Main', { screen: 'Tabs', params: { screen: 'Matches' } });
+    navigation.navigate('AdminTournamentDetail', { tournamentId: tournament.id });
   }
 
   function openTeam(team: Team) {
