@@ -32,8 +32,8 @@ import {
   matchKindToFormat,
   toYmd,
 } from '../../../constants/tournamentSetup';
-import { BallType, PitchType, TournamentCategory, TournamentMatchKind } from '../../../types';
-import { useAuthStore, useScopeStore, useTournamentsStore } from '../../../store';
+import { BallType, PitchType, Team, TournamentCategory, TournamentMatchKind } from '../../../types';
+import { useAuthStore, useScopeStore, useTeamsStore, useTournamentsStore } from '../../../store';
 import { createTournament, uploadImage } from '../../../firebase';
 import { isLocalImageUri } from '../../../services/cloudinary';
 import { DEFAULT_CLUB_ID } from '../../../constants/scope';
@@ -78,7 +78,7 @@ export default function CreateTournamentScreen({ navigation }: any) {
   const [needsOfficials, setNeedsOfficials] = useState(false);
 
   function pickImage(onUri: (uri: string) => void) {
-    launchImageLibrary({ mediaType: 'photo', quality: 0.85 }, response => {
+    launchImageLibrary({ mediaType: 'photo', quality: 0.8 }, response => {
       if (response.didCancel) return;
       if (response.errorMessage) {
         showAlert('Gallery', response.errorMessage);
@@ -162,6 +162,8 @@ export default function CreateTournamentScreen({ navigation }: any) {
       } else if (bannerUri) {
         bannerURL = bannerUri;
       }
+      const allTeams = useTeamsStore.getState().teams;
+      const clubTeamIds = allTeams.filter((t: Team) => t.clubId === createClubId).map((t: Team) => t.id);
       const scoring = matchKindToFormat(matchKind);
       const year = startDate.getFullYear();
       const payload = {
@@ -190,12 +192,12 @@ export default function CreateTournamentScreen({ navigation }: any) {
         status: 'UPCOMING' as const,
         format: scoring.format,
         type: 'league' as const,
-        totalTeams: 0,
+        totalTeams: clubTeamIds.length,
         totalMatches: 0,
         overs: scoring.overs,
         ballsPerOver: scoring.ballsPerOver,
         wicketsPerInnings: 10,
-        teamIds: [] as string[],
+        teamIds: clubTeamIds,
         groups: [] as [],
         pointsConfig: { win: 2, tie: 1, nr: 1 },
       };

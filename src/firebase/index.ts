@@ -382,6 +382,11 @@ export const listenMatchesInClubs = (clubIds: string[], cb: (matches: Match[]) =
     String(b.dateTime || '').localeCompare(String(a.dateTime || '')),
   );
 
+export const listenUserMatches = (userId: string, cb: (matches: Match[]) => void) =>
+  listenByChild<Match>('matches', 'createdBy', userId, cb, (a, b) =>
+    String(b.dateTime || '').localeCompare(String(a.dateTime || '')),
+  );
+
 export const listenTournamentsInClubs = (clubIds: string[], cb: (tournaments: Tournament[]) => void) =>
   listenInClubIds<Tournament>('tournaments', clubIds, cb, (a, b) =>
     b.year - a.year || a.name.localeCompare(b.name),
@@ -389,6 +394,9 @@ export const listenTournamentsInClubs = (clubIds: string[], cb: (tournaments: To
 
 export const listenTeamsInClubs = (clubIds: string[], cb: (teams: Team[]) => void) =>
   listenInClubIds<Team>('teams', clubIds, cb, (a, b) => a.name.localeCompare(b.name));
+
+export const listenUserTeams = (userId: string, cb: (teams: Team[]) => void) =>
+  listenByChild<Team>('teams', 'createdBy', userId, cb, (a, b) => a.name.localeCompare(b.name));
 
 export const createMatch = (data: Omit<Match, 'id'>) => pushNode('matches', data);
 

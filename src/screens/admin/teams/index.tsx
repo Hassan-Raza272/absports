@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, StatusBar, Image } from 'react-native';
 import BackButton from '../../../components/BackButton';
 import { showAlert } from '../../../components/PremiumAlert';
@@ -6,9 +6,26 @@ import { SkeletonEntityList } from '../../../components/Skeleton';
 import LinearGradient from 'react-native-linear-gradient';
 import { launchImageLibrary } from 'react-native-image-picker';
 import { Colors, Typography, Spacing, Radius } from '../../../theme';
-import { useTeamsStore, usePointsTableStore, useAuthStore, useScopeStore, useScopeLabels, usePlayersStore } from '../../../store';
+import {
+  useTeamsStore,
+  usePointsTableStore,
+  useAuthStore,
+  useScopeStore,
+  useScopeLabels,
+  usePlayersStore,
+  useClubsStore,
+  useHubStore,
+} from '../../../store';
 import { Team, PointsTableEntry } from '../../../types';
-import { addTeam as addRemoteTeam, deleteTeam as deleteRemoteTeam, deletePlayer as deleteRemotePlayer, updateTeam as updateRemoteTeam, uploadImage } from '../../../firebase';
+import {
+  addTeam as addRemoteTeam,
+  deleteTeam as deleteRemoteTeam,
+  deletePlayer as deleteRemotePlayer,
+  updateTeam as updateRemoteTeam,
+  uploadImage,
+  listenUserTeams,
+} from '../../../firebase';
+import { isUsersOwnTeam } from '../../../utils/account';
 import { isLocalImageUri } from '../../../services/cloudinary';
 import { randomPremiumTeamLogo } from '../../../utils/defaultLogo';
 import TeamLogoAvatar from '../../../components/TeamLogoAvatar';
@@ -22,9 +39,20 @@ const BRAND_COLORS = [
   { primary: '#AA00FF', secondary: '#4A148C', name: 'Purple' },
 ];
 
+function uniqueTeams(rows: Team[]): Team[] {
+  const seen = new Set<string>();
+  return rows.filter(t => {
+    if (!t?.id || seen.has(t.id)) return false;
+    seen.add(t.id);
+    return true;
+  });
+}
+
 export default function AdminTeamsScreen({ navigation }: any) {
-  const teams = useTeamsStore(state => state.teams);
-  const teamsReady = useTeamsStore(state => state.ready);
+  const localTeams = useTeamsStore(state => state.teams);
+  const localTeamsReady = useTeamsStore(state => state.ready);
+  const hubTeams = useHubStore(state => state.teams);
+  const hubReady = useHubStore(state => state.ready);
   const updateTeam = useTeamsStore(state => state.updateTeam);
   const deleteTeam = useTeamsStore(state => state.deleteTeam);
 
@@ -35,12 +63,30 @@ export default function AdminTeamsScreen({ navigation }: any) {
   const { subtitle } = useScopeLabels();
 
   const user = useAuthStore(state => state.user);
+  const clubs = useClubsStore(state => state.clubs);
+  const [userTeams, setUserTeams] = useState<Team[]>([]);
+  const [userTeamsReady, setUserTeamsReady] = useState(false);
+
   useEffect(() => {
     if (!user) {
       showAlert('Sign in', 'Sign in to manage teams.');
       navigation.replace('Main');
+      return;
     }
+    const unsub = listenUserTeams(user.id, teams => {
+      setUserTeams(teams);
+      setUserTeamsReady(true);
+    });
+    return () => {
+      if (typeof unsub === 'function') unsub();
+    };
   }, [user, navigation]);
+
+  const myTeams = useMemo(() => {
+    if (!user) return [];
+    const merged = uniqueTeams([...userTeams, ...localTeams, ...hubTeams]);
+    return merged.filter(team => isUsersOwnTeam(user, team, clubs));
+  }, [user, userTeams, localTeams, hubTeams, clubs]);
 
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -99,6 +145,11 @@ export default function AdminTeamsScreen({ navigation }: any) {
     }
 
     if (editingId) {
+      const existingTeam = myTeams.find(t => t.id === editingId);
+      if (existingTeam && !isUsersOwnTeam(user, existingTeam, clubs)) {
+        showAlert('Permission Denied', 'You can only edit teams that you created.');
+        return;
+      }
       // Update existing team
       updateTeam(editingId, {
         name: form.name,
@@ -128,12 +179,13 @@ export default function AdminTeamsScreen({ navigation }: any) {
       // Create new team
       const teamPayload: Omit<Team, 'id'> = {
         clubId: selectedClubId,
+        createdBy: user?.id,
         name: form.name,
         shortName: form.shortName.toUpperCase(),
         captain: form.captain || 'TBD',
         viceCaptain: 'TBD',
         coach: form.coach || 'TBD',
-        owner: form.owner || 'TBD',
+        owner: form.owner || user?.name || 'TBD',
         homeGround: 'Club Ground',
         logoURL,
         primaryColor: selectedColor.primary,
@@ -177,7 +229,7 @@ export default function AdminTeamsScreen({ navigation }: any) {
       };
       addPTEntry(ptEntry);
 
-      showAlert('Success', `Team "${form.name}" added to ${subtitle}.`);
+      showAlert('Success', `Team "${form.name}" added!`);
     }
 
     setAdding(false);
@@ -185,6 +237,10 @@ export default function AdminTeamsScreen({ navigation }: any) {
   }
 
   function handleEdit(team: Team) {
+    if (!isUsersOwnTeam(user, team, clubs)) {
+      showAlert('Permission Denied', 'You can only edit teams that you created.');
+      return;
+    }
     const cIndex = BRAND_COLORS.findIndex(c => c.primary === team.primaryColor);
     setForm({
       name: team.name,
@@ -200,6 +256,10 @@ export default function AdminTeamsScreen({ navigation }: any) {
   }
 
   function handleDelete(team: Team) {
+    if (!isUsersOwnTeam(user, team, clubs)) {
+      showAlert('Permission Denied', 'You can only delete teams that you created.');
+      return;
+    }
     showAlert(
       'Delete Team',
       `Are you sure you want to delete ${team.name}? This will also remove their squad players.`,
@@ -209,6 +269,7 @@ export default function AdminTeamsScreen({ navigation }: any) {
           const squad = usePlayersStore.getState().players.filter(p => p.teamId === team.id);
           deleteTeam(team.id);
           deletePTEntry(team.id);
+          setUserTeams(prev => prev.filter(t => t.id !== team.id));
           squad.forEach(p => usePlayersStore.getState().deletePlayer(p.id));
           try {
             await deleteRemoteTeam(team.id);
@@ -234,7 +295,7 @@ export default function AdminTeamsScreen({ navigation }: any) {
         </TouchableOpacity>
       </LinearGradient>
 
-      {!teamsReady ? (
+      {!localTeamsReady && !hubReady && !userTeamsReady ? (
         <SkeletonEntityList count={6} />
       ) : (
       <ScrollView contentContainerStyle={{ padding: Spacing.base, paddingBottom: 80 }} showsVerticalScrollIndicator={false}>
@@ -306,13 +367,13 @@ export default function AdminTeamsScreen({ navigation }: any) {
           </LinearGradient>
         )}
 
-        {teams.length === 0 ? (
+        {myTeams.length === 0 ? (
           <View style={styles.emptyView}>
-            <Text style={styles.emptyText}>No teams in this club yet.</Text>
-            <Text style={styles.emptySub}>Tap “+ Add Team” to register a squad for scoring.</Text>
+            <Text style={styles.emptyText}>No teams created yet.</Text>
+            <Text style={styles.emptySub}>Tap “+ Add Team” to create and manage your own squads.</Text>
           </View>
         ) : (
-          teams.map(team => (
+          myTeams.map(team => (
             <LinearGradient key={team.id} colors={Colors.gradCard} style={styles.teamCard}>
               <TeamLogoAvatar
                 name={team.name}

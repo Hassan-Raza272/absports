@@ -1,4 +1,6 @@
 import { Image, ImageSourcePropType } from 'react-native';
+import { useHubStore, useTeamsStore } from '../store';
+import { Team } from '../types';
 
 /** Deep sports-club palettes — navy, crimson, jade, gold, charcoal (not pastel). */
 const PRO_PALETTES = [
@@ -78,7 +80,8 @@ export function isBundledCricketLogo(uri?: string | null): boolean {
 
 export function bundledCricketLogoSource(uri?: string | null): ImageSourcePropType | null {
   if (!isBundledCricketLogo(uri)) return null;
-  const id = String(uri).slice(BUNDLED_PREFIX.length);
+  const rawId = String(uri).slice(BUNDLED_PREFIX.length);
+  const id = rawId.split('#')[0].split('?')[0];
   return CRICKET_LOGO_PACK[id] || null;
 }
 
@@ -122,10 +125,62 @@ export function defaultLogoURL(seed: string, _kind: 'team' | 'club' = 'team'): s
 }
 
 /**
- * Pick a random cricket crest from the local pack when the user skips a logo upload.
- * Stored as `bundled:cricket-logo-N` so every device can render it offline.
+ * Pick a unique cricket crest from the local pack when the user skips a logo upload.
+ * Checks existing teams so every newly created team is assigned a UNIQUE, non-duplicate logo.
  */
-export function randomPremiumTeamLogo(_teamName?: string): string {
-  const id = CRICKET_LOGO_IDS[Math.floor(Math.random() * CRICKET_LOGO_IDS.length)];
-  return `${BUNDLED_PREFIX}${id}`;
+export function randomPremiumTeamLogo(
+  seed?: string,
+  existingTeamsOrLogos?: (Team | string | null | undefined)[],
+): string {
+  const cleanSeed = (seed || '').trim() || `team-${Date.now()}`;
+
+  // 1. Collect all logo URLs currently in use
+  const usedLogos = new Set<string>();
+
+  if (existingTeamsOrLogos) {
+    for (const item of existingTeamsOrLogos) {
+      if (typeof item === 'string' && item.trim()) {
+        usedLogos.add(item.trim());
+      } else if (item && typeof item === 'object' && item.logoURL) {
+        usedLogos.add(item.logoURL.trim());
+      }
+    }
+  }
+
+  try {
+    const localTeams = useTeamsStore?.getState?.()?.teams || [];
+    const hubTeams = useHubStore?.getState?.()?.teams || [];
+    for (const t of [...localTeams, ...hubTeams]) {
+      if (t?.logoURL) {
+        usedLogos.add(t.logoURL.trim());
+      }
+    }
+  } catch {
+    // Fallback if store is uninitialized
+  }
+
+  // Normalize used logos to extract base bundled IDs (e.g. 'cricket-logo-1')
+  const usedBundledIds = new Set<string>();
+  usedLogos.forEach(logo => {
+    if (isBundledCricketLogo(logo)) {
+      const rawId = logo.slice(BUNDLED_PREFIX.length).split('#')[0].split('?')[0];
+      usedBundledIds.add(rawId);
+    }
+  });
+
+  // 2. Find unused bundled cricket logo IDs
+  const unusedIds = CRICKET_LOGO_IDS.filter(id => !usedBundledIds.has(id));
+
+  if (unusedIds.length > 0) {
+    // Pick an unused logo deterministically using the seed hash
+    const hashIndex = Math.abs(hashSeed(cleanSeed)) % unusedIds.length;
+    const selectedId = unusedIds[hashIndex];
+    return `${BUNDLED_PREFIX}${selectedId}`;
+  }
+
+  // 3. If all 8 bundled logos are already assigned, append a unique tag to guarantee uniqueness
+  const baseIndex = Math.abs(hashSeed(cleanSeed)) % CRICKET_LOGO_IDS.length;
+  const baseId = CRICKET_LOGO_IDS[baseIndex];
+  const uniqueTag = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  return `${BUNDLED_PREFIX}${baseId}#${uniqueTag}`;
 }
