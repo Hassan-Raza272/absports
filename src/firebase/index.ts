@@ -398,6 +398,11 @@ export const listenTeamsInClubs = (clubIds: string[], cb: (teams: Team[]) => voi
 export const listenUserTeams = (userId: string, cb: (teams: Team[]) => void) =>
   listenByChild<Team>('teams', 'createdBy', userId, cb, (a, b) => a.name.localeCompare(b.name));
 
+export const listenUserTournaments = (userId: string, cb: (tournaments: Tournament[]) => void) =>
+  listenByChild<Tournament>('tournaments', 'createdBy', userId, cb, (a, b) =>
+    b.year - a.year || a.name.localeCompare(b.name),
+  );
+
 export const createMatch = (data: Omit<Match, 'id'>) => pushNode('matches', data);
 
 export const updateMatch = (id: string, data: Partial<Match>) =>

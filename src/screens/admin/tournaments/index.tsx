@@ -22,10 +22,9 @@ import {
   useHubStore,
   useScopeStore,
   useTournamentsStore,
-  useUserClubs,
 } from '../../../store';
 import { Tournament } from '../../../types';
-import { isSuperAdmin } from '../../../utils/account';
+import { isUsersOwnTournament } from '../../../utils/account';
 import TournamentBanner from '../../../components/TournamentBanner';
 
 function uniqueById<T extends { id: string }>(rows: T[]): T[] {
@@ -40,7 +39,6 @@ function uniqueById<T extends { id: string }>(rows: T[]): T[] {
 export default function AdminTournamentsScreen({ navigation, route }: any) {
   const user = useAuthStore(state => state.user);
   const clubs = useClubsStore(state => state.clubs);
-  const myClubs = useUserClubs();
   const localTournaments = useTournamentsStore(state => state.tournaments);
   const tournamentsReady = useTournamentsStore(state => state.ready);
   const hubTournaments = useHubStore(state => state.tournaments);
@@ -64,17 +62,13 @@ export default function AdminTournamentsScreen({ navigation, route }: any) {
     }
   }, [route?.params?.openCreate, navigation]);
 
-  const ownedClubIds = useMemo(() => {
-    if (isSuperAdmin(user)) return new Set(clubs.map(c => c.id));
-    return new Set(myClubs.map(c => c.id));
-  }, [user, clubs, myClubs]);
-
   const mine = useMemo(() => {
+    if (!user) return [];
     const merged = uniqueById([...localTournaments, ...hubTournaments]);
     return merged
-      .filter(t => ownedClubIds.has(t.clubId) || (!!user && t.createdBy === user.id))
+      .filter(t => isUsersOwnTournament(user, t, clubs))
       .sort((a, b) => (b.year || 0) - (a.year || 0) || a.name.localeCompare(b.name));
-  }, [localTournaments, hubTournaments, ownedClubIds, user]);
+  }, [localTournaments, hubTournaments, clubs, user]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
