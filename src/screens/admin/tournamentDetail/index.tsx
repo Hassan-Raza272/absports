@@ -15,7 +15,7 @@ import {
   updateTournament as updateRemoteTournament,
   addTeam as addRemoteTeam,
 } from '../../../firebase';
-import { Match, MatchStatus, Team, Tournament } from '../../../types';
+import { Match, MatchStatus, Team, Tournament, TournamentGroup } from '../../../types';
 import { DEFAULT_MATCH_SETTINGS } from '../../../utils/matchSettings';
 import { buildRoundRobinPairings, nextKickoff } from '../../../utils/roundRobin';
 import { buildPointsTable } from '../../../utils/scoring';
@@ -25,6 +25,15 @@ import TournamentBanner from '../../../components/TournamentBanner';
 import PremiumPointsTable from '../../../components/PremiumPointsTable';
 import PremiumGoLiveModal from '../../../components/PremiumGoLiveModal';
 import { canUserGoLiveOnMatch, isUsersOwnMatch } from '../../../utils/account';
+import {
+  makeDefaultPools,
+  makePoolId,
+  placeTeamInPool,
+  poolForTeam,
+  poolLabel,
+  removeTeamFromPools,
+  teamIdsFromPools,
+} from '../../../utils/tournamentPools';
 
 type Tab = 'overview' | 'teams' | 'fixtures' | 'table';
 
@@ -114,8 +123,13 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
 
   const tournament = tournaments.find(t => t.id === tournamentId);
   const clubTeams = allTeams.filter(t => t.clubId === (tournament?.clubId || selectedClubId));
-  const enrolledIds = tournament?.teamIds || [];
+  const pools: TournamentGroup[] = tournament?.groups || [];
+  const hasPools = pools.length > 0;
+  const enrolledIds = hasPools
+    ? teamIdsFromPools(pools, tournament?.teamIds || [])
+    : tournament?.teamIds || [];
   const enrolledTeams = clubTeams.filter(t => enrolledIds.includes(t.id));
+  const unassignedTeams = enrolledTeams.filter(t => !poolForTeam(pools, t.id));
   const fixtureTeamOptions = [
     ...enrolledTeams,
     ...clubTeams.filter(c => !enrolledIds.includes(c.id)),
@@ -147,6 +161,7 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
 
   const [homeAndAway, setHomeAndAway] = useState(!!tournament?.homeAway);
   const [hoursApart, setHoursApart] = useState('24');
+  const [selectedPoolId, setSelectedPoolId] = useState(pools[0]?.id || '');
 
   const tableEntries = useMemo(() => {
     if (!tournament) return [];
@@ -157,9 +172,26 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
     });
   }, [tournament, clubTeams, tourneyMatches, enrolledIds]);
 
+  const poolTables = useMemo(() => {
+    if (!tournament || !hasPools) return [];
+    return pools.map(group => ({
+      group,
+      entries: buildPointsTable(clubTeams, tourneyMatches.filter(m => !m.groupId || m.groupId === group.id), {
+        pointsConfig: tournament.pointsConfig,
+        overrides: tournament.pointsOverrides,
+        enrolledTeamIds: group.teamIds,
+        groupTeamIds: group.teamIds,
+      }),
+    }));
+  }, [tournament, hasPools, pools, clubTeams, tourneyMatches]);
+
   useEffect(() => {
     if (requestedTab && TABS.some(t => t.key === requestedTab)) setTab(requestedTab);
   }, [requestedTab]);
+
+  useEffect(() => {
+    if (!selectedPoolId && pools[0]?.id) setSelectedPoolId(pools[0].id);
+  }, [pools, selectedPoolId]);
 
   const [showGoLivePremiumModal, setShowGoLivePremiumModal] = useState(false);
 
@@ -202,11 +234,56 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
     }
   }
 
-  async function toggleEnroll(teamId: string) {
+  async function toggleEnroll(teamId: string, poolId?: string) {
+    if (hasPools) {
+      const targetPool = poolId || selectedPoolId || pools[0]?.id;
+      const alreadyIn = poolForTeam(pools, teamId)?.id === targetPool && enrolledIds.includes(teamId);
+      const nextGroups = alreadyIn
+        ? removeTeamFromPools(pools, teamId)
+        : placeTeamInPool(pools, targetPool, teamId);
+      const nextIds = teamIdsFromPools(nextGroups, enrolledIds);
+      await persistTournament({ groups: nextGroups, teamIds: nextIds, totalTeams: nextIds.length });
+      return;
+    }
     const next = enrolledIds.includes(teamId)
       ? enrolledIds.filter(id => id !== teamId)
       : [...enrolledIds, teamId];
     await persistTournament({ teamIds: next, totalTeams: next.length });
+  }
+
+  async function enablePools() {
+    const next = makeDefaultPools(2, pools);
+    const nextIds = teamIdsFromPools(next, enrolledIds);
+    setSelectedPoolId(next[0]?.id || '');
+    await persistTournament({
+      groups: next,
+      type: t.type === 'knockout' ? t.type : 'hybrid',
+      teamIds: nextIds,
+      totalTeams: nextIds.length,
+    }, 'Two pools added. Place teams in Pool A or Pool B.');
+  }
+
+  async function addPool() {
+    const next = [...pools, { id: makePoolId(), name: poolLabel(pools.length), teamIds: [] }];
+    setSelectedPoolId(next[next.length - 1].id);
+    await persistTournament({ groups: next, type: t.type === 'knockout' ? t.type : 'hybrid' });
+  }
+
+  async function renamePool(poolId: string, name: string) {
+    const next = pools.map(g => (g.id === poolId ? { ...g, name } : g));
+    await persistTournament({ groups: next });
+  }
+
+  async function deletePool(poolId: string) {
+    const next = pools.filter(g => g.id !== poolId);
+    const nextIds = teamIdsFromPools(next, enrolledIds);
+    if (selectedPoolId === poolId) setSelectedPoolId(next[0]?.id || '');
+    await persistTournament({
+      groups: next,
+      teamIds: nextIds,
+      totalTeams: nextIds.length,
+      type: next.length ? t.type : 'league',
+    });
   }
 
   async function createAndEnrollTeam() {
@@ -235,8 +312,16 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
         stats: { played: 0, won: 0, lost: 0, nr: 0, nrr: 0, points: 0 },
       };
       const ref = await addRemoteTeam(payload);
-      const next = Array.from(new Set([...enrolledIds, String(ref.id)]));
-      await persistTournament({ teamIds: next, totalTeams: next.length });
+      const newId = String(ref.id);
+      const nextGroups = hasPools
+        ? placeTeamInPool(pools, selectedPoolId || pools[0]?.id, newId)
+        : pools;
+      const next = hasPools ? teamIdsFromPools(nextGroups, enrolledIds) : Array.from(new Set([...enrolledIds, newId]));
+      await persistTournament({
+        teamIds: next,
+        totalTeams: next.length,
+        ...(hasPools ? { groups: nextGroups } : {}),
+      });
       setNewTeamName('');
       setNewTeamShort('');
       showAlert('Team added', `${payload.name} is enrolled in this tournament.`);
@@ -298,7 +383,8 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
       overs: parseInt(fixtureForm.overs, 10) || t.overs,
       settings: DEFAULT_MATCH_SETTINGS,
       status: fixtureForm.status,
-      stage: 'league',
+      stage: hasPools ? 'group' : 'league',
+      groupId: poolForTeam(pools, teamA.id)?.id || selectedPoolId || undefined,
       innings: {},
     };
     const nextTeamIds = Array.from(new Set([...enrolledIds, teamA.id, teamB.id]));
@@ -356,20 +442,34 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
   }
 
   async function generateRoundRobin() {
-    if (enrolledTeams.length < 2) {
-      showAlert('Need teams', 'Enroll at least two teams first.');
+    const jobs: { teams: Team[]; groupId?: string; groupName?: string }[] = hasPools
+      ? pools
+          .filter(g => g.teamIds.length >= 2)
+          .map(g => ({
+            teams: clubTeams.filter(team => g.teamIds.includes(team.id)),
+            groupId: g.id,
+            groupName: g.name,
+          }))
+      : [{ teams: enrolledTeams }];
+    if (!jobs.length || jobs.every(j => j.teams.length < 2)) {
+      showAlert('Need teams', hasPools ? 'Put at least two teams in a pool first.' : 'Enroll at least two teams first.');
       return;
     }
-    const pairs = buildRoundRobinPairings(enrolledTeams, homeAndAway);
-    if (!pairs.length) {
+    const pairJobs = jobs.map(job => ({
+      ...job,
+      pairs: buildRoundRobinPairings(job.teams, homeAndAway),
+    }));
+    const totalPairs = pairJobs.reduce((sum, job) => sum + job.pairs.length, 0);
+    if (!totalPairs) {
       showAlert('Nothing to generate', 'Could not build pairings.');
       return;
     }
     const gap = Math.max(1, parseInt(hoursApart, 10) || 24);
     const start = defaultKickoff();
+    const poolNote = hasPools ? ` within ${pairJobs.length} pool${pairJobs.length === 1 ? '' : 's'}` : '';
     showAlert(
       'Generate schedule',
-      `Create ${pairs.length} upcoming match${pairs.length === 1 ? '' : 'es'}?`,
+      `Create ${totalPairs} upcoming match${totalPairs === 1 ? '' : 'es'}${poolNote}?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -377,31 +477,34 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
           onPress: async () => {
             let created = 0;
             try {
-              for (let i = 0; i < pairs.length; i++) {
-                const p = pairs[i];
-                const payload: Omit<Match, 'id'> = {
-                  clubId: t.clubId,
-                  tournamentId: t.id,
-                  matchNumber: tourneyMatches.length + created + 1,
-                  teamA: p.teamA.id,
-                  teamB: p.teamB.id,
-                  teamAName: p.teamA.name,
-                  teamBName: p.teamB.name,
-                  teamALogo: p.teamA.logoURL,
-                  teamBLogo: p.teamB.logoURL,
-                  venue: t.venue || 'TBD',
-                  dateTime: nextKickoff(start, i, gap).toISOString(),
-                  overs: t.overs,
-                  settings: DEFAULT_MATCH_SETTINGS,
-                  status: 'UPCOMING',
-                  stage: 'league',
-                  round: p.round,
-                  innings: {},
-                  createdBy: user?.id,
-                };
-                const ref = await createRemoteMatch(payload);
-                addMatchLocal({ ...payload, id: String(ref.id) });
-                created += 1;
+              for (const job of pairJobs) {
+                for (let i = 0; i < job.pairs.length; i++) {
+                  const p = job.pairs[i];
+                  const payload: Omit<Match, 'id'> = {
+                    clubId: t.clubId,
+                    tournamentId: t.id,
+                    matchNumber: tourneyMatches.length + created + 1,
+                    teamA: p.teamA.id,
+                    teamB: p.teamB.id,
+                    teamAName: p.teamA.name,
+                    teamBName: p.teamB.name,
+                    teamALogo: p.teamA.logoURL,
+                    teamBLogo: p.teamB.logoURL,
+                    venue: t.venue || 'TBD',
+                    dateTime: nextKickoff(start, created, gap).toISOString(),
+                    overs: t.overs,
+                    settings: DEFAULT_MATCH_SETTINGS,
+                    status: 'UPCOMING',
+                    stage: job.groupId ? 'group' : 'league',
+                    groupId: job.groupId,
+                    round: p.round,
+                    innings: {},
+                    createdBy: user?.id,
+                  };
+                  const ref = await createRemoteMatch(payload);
+                  addMatchLocal({ ...payload, id: String(ref.id) });
+                  created += 1;
+                }
               }
               await persistTournament({ totalMatches: tourneyMatches.length + created });
               showAlert('Done', `${created} fixtures created.`);
@@ -474,9 +577,11 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
             {[
               {
                 n: '1',
-                title: 'Add teams',
-                hint: enrolledIds.length ? `${enrolledIds.length} enrolled` : 'Register at least two squads',
-                done: enrolledIds.length >= 2,
+                title: hasPools ? 'Add teams to pools' : 'Add teams',
+                hint: hasPools
+                  ? `${enrolledIds.length} teams · ${pools.length} pools`
+                  : enrolledIds.length ? `${enrolledIds.length} enrolled` : 'Register at least two squads',
+                done: hasPools ? pools.every(g => g.teamIds.length >= 2) || enrolledIds.length >= 2 : enrolledIds.length >= 2,
                 tab: 'teams' as Tab,
               },
               {
@@ -515,43 +620,162 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
         )}
 
         {currentTab === 'teams' && (
-          <View style={styles.card}>
+          <View>
             {isOwner && (
-              <>
+              <View style={styles.card}>
                 <Text style={styles.section}>Add a team</Text>
-                <Text style={styles.hint}>Create a squad and enroll it in this tournament.</Text>
+                <Text style={styles.hint}>
+                  {hasPools
+                    ? `New squads go into ${pools.find(p => p.id === selectedPoolId)?.name || 'the selected pool'}.`
+                    : 'Create a squad and enroll it in this tournament.'}
+                </Text>
+                {hasPools && (
+                  <View style={styles.poolChipRow}>
+                    {pools.map(pool => (
+                      <TouchableOpacity
+                        key={pool.id}
+                        onPress={() => setSelectedPoolId(pool.id)}
+                        style={[styles.chip, selectedPoolId === pool.id && styles.chipOn]}>
+                        <Text style={[styles.chipText, selectedPoolId === pool.id && styles.chipTextOn]}>{pool.name}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
                 <TextInput style={styles.input} placeholder="Team name *" placeholderTextColor={Colors.textMuted} value={newTeamName} onChangeText={setNewTeamName} />
                 <TextInput style={styles.input} placeholder="Short name * (e.g. LIO)" placeholderTextColor={Colors.textMuted} value={newTeamShort} onChangeText={setNewTeamShort} autoCapitalize="characters" />
-                <TouchableOpacity disabled={addingTeam || saving} onPress={createAndEnrollTeam} style={{ marginBottom: Spacing.lg }}>
+                <TouchableOpacity disabled={addingTeam || saving} onPress={createAndEnrollTeam} style={{ marginBottom: Spacing.sm }}>
                   <LinearGradient colors={Colors.gradGold} style={styles.primaryBtn}>
-                    <Text style={styles.primaryBtnText}>{addingTeam ? 'Adding…' : 'Add team to tournament'}</Text>
+                    <Text style={styles.primaryBtnText}>{addingTeam ? 'Adding…' : hasPools ? 'Add team to pool' : 'Add team to tournament'}</Text>
                   </LinearGradient>
                 </TouchableOpacity>
-              </>
+              </View>
             )}
 
-            <Text style={styles.section}>Enrolled squads ({enrolledIds.length})</Text>
-            {isOwner && <Text style={styles.hint}>Tap a club team to enroll or remove it.</Text>}
-            {clubTeams.length === 0 && (
-              <Text style={styles.empty}>No enrolled teams yet.</Text>
+            {isOwner && !hasPools && (
+              <TouchableOpacity onPress={enablePools} style={styles.addBtn}>
+                <Text style={styles.addBtnText}>+ Split into pools</Text>
+              </TouchableOpacity>
             )}
-            {clubTeams.map(team => {
-              const on = enrolledIds.includes(team.id);
-              if (!isOwner && !on) return null;
-              return (
-                <TouchableOpacity
-                  key={team.id}
-                  disabled={!isOwner}
-                  onPress={() => toggleEnroll(team.id)}
-                  style={[styles.teamRow, on && styles.teamRowOn]}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.teamName}>{team.name}</Text>
-                    <Text style={styles.meta}>{team.shortName}</Text>
+
+            {hasPools ? (
+              <>
+                {isOwner && (
+                  <View style={styles.poolActions}>
+                    <TouchableOpacity onPress={addPool} style={styles.addBtn}>
+                      <Text style={styles.addBtnText}>+ Add pool</Text>
+                    </TouchableOpacity>
                   </View>
-                  <Text style={[styles.badge, on && styles.badgeOn]}>{on ? 'ENROLLED' : 'Add'}</Text>
-                </TouchableOpacity>
-              );
-            })}
+                )}
+                {pools.map(pool => {
+                  const poolTeams = clubTeams.filter(team => pool.teamIds.includes(team.id));
+                  return (
+                    <View key={pool.id} style={styles.card}>
+                      {isOwner ? (
+                        <TextInput
+                          key={pool.id}
+                          style={styles.poolTitleInput}
+                          defaultValue={pool.name}
+                          onEndEditing={e => {
+                            const name = e.nativeEvent.text.trim();
+                            if (name && name !== pool.name) renamePool(pool.id, name);
+                          }}
+                          placeholder="Pool name"
+                          placeholderTextColor={Colors.textMuted}
+                        />
+                      ) : (
+                        <Text style={styles.section}>{pool.name}</Text>
+                      )}
+                      <Text style={styles.hint}>{pool.teamIds.length} teams in this pool</Text>
+                      {poolTeams.map(team => (
+                        <TouchableOpacity
+                          key={team.id}
+                          disabled={!isOwner}
+                          onPress={() => toggleEnroll(team.id, pool.id)}
+                          style={[styles.teamRow, styles.teamRowOn]}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.teamName}>{team.name}</Text>
+                            <Text style={styles.meta}>{team.shortName}</Text>
+                          </View>
+                          {isOwner && <Text style={styles.badgeOn}>Remove</Text>}
+                        </TouchableOpacity>
+                      ))}
+                      {isOwner && (
+                        <>
+                          <Text style={styles.label}>Add to {pool.name}</Text>
+                          {clubTeams.filter(team => !pool.teamIds.includes(team.id)).map(team => {
+                            const other = poolForTeam(pools, team.id);
+                            return (
+                              <TouchableOpacity
+                                key={team.id}
+                                onPress={() => toggleEnroll(team.id, pool.id)}
+                                style={styles.teamRow}>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={styles.teamName}>{team.name}</Text>
+                                  <Text style={styles.meta}>
+                                    {team.shortName}{other ? ` · in ${other.name}` : ''}
+                                  </Text>
+                                </View>
+                                <Text style={styles.badge}>{other ? 'Move' : 'Add'}</Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                          {pools.length > 2 && (
+                            <TouchableOpacity onPress={() => deletePool(pool.id)} style={{ marginTop: Spacing.sm }}>
+                              <Text style={[styles.link, { color: Colors.loss }]}>Delete pool</Text>
+                            </TouchableOpacity>
+                          )}
+                        </>
+                      )}
+                      {poolTeams.length === 0 && !isOwner && <Text style={styles.empty}>No teams in this pool.</Text>}
+                    </View>
+                  );
+                })}
+                {unassignedTeams.length > 0 && (
+                  <View style={styles.card}>
+                    <Text style={styles.section}>Unassigned</Text>
+                    <Text style={styles.hint}>These squads are enrolled but not in a pool yet.</Text>
+                    {unassignedTeams.map(team => (
+                      <View key={team.id} style={styles.teamRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.teamName}>{team.name}</Text>
+                          <Text style={styles.meta}>{team.shortName}</Text>
+                        </View>
+                        {isOwner && pools.map(pool => (
+                          <TouchableOpacity key={pool.id} onPress={() => toggleEnroll(team.id, pool.id)} style={{ marginLeft: 8 }}>
+                            <Text style={styles.link}>{pool.name}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </>
+            ) : (
+              <View style={styles.card}>
+                <Text style={styles.section}>Enrolled squads ({enrolledIds.length})</Text>
+                {isOwner && <Text style={styles.hint}>Tap a club team to enroll or remove it.</Text>}
+                {clubTeams.length === 0 && (
+                  <Text style={styles.empty}>No enrolled teams yet.</Text>
+                )}
+                {clubTeams.map(team => {
+                  const on = enrolledIds.includes(team.id);
+                  if (!isOwner && !on) return null;
+                  return (
+                    <TouchableOpacity
+                      key={team.id}
+                      disabled={!isOwner}
+                      onPress={() => toggleEnroll(team.id)}
+                      style={[styles.teamRow, on && styles.teamRowOn]}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.teamName}>{team.name}</Text>
+                        <Text style={styles.meta}>{team.shortName}</Text>
+                      </View>
+                      <Text style={[styles.badge, on && styles.badgeOn]}>{on ? 'ENROLLED' : 'Add'}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
           </View>
         )}
 
@@ -561,7 +785,11 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
               <>
                 <View style={styles.card}>
                   <Text style={styles.section}>Auto schedule</Text>
-                  <Text style={styles.hint}>Build a full round-robin between enrolled teams.</Text>
+                  <Text style={styles.hint}>
+                    {hasPools
+                      ? 'Build a round-robin inside each pool. Teams do not play across pools.'
+                      : 'Build a full round-robin between enrolled teams.'}
+                  </Text>
                   <TouchableOpacity onPress={() => setHomeAndAway(v => !v)} style={[styles.chip, homeAndAway && styles.chipOn, { alignSelf: 'flex-start', marginBottom: Spacing.sm }]}>
                     <Text style={[styles.chipText, homeAndAway && styles.chipTextOn]}>Home & away (2 legs)</Text>
                   </TouchableOpacity>
@@ -569,7 +797,7 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
                   <TextInput style={styles.input} keyboardType="number-pad" value={hoursApart} onChangeText={setHoursApart} />
                   <TouchableOpacity onPress={generateRoundRobin} style={{ marginTop: Spacing.sm }}>
                     <LinearGradient colors={Colors.gradPrimary} style={styles.primaryBtn}>
-                      <Text style={styles.primaryBtnText}>Generate round-robin</Text>
+                      <Text style={styles.primaryBtnText}>{hasPools ? 'Generate pool fixtures' : 'Generate round-robin'}</Text>
                     </LinearGradient>
                   </TouchableOpacity>
                 </View>
@@ -645,6 +873,7 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
               <LinearGradient key={match.id} colors={Colors.gradCard} style={styles.matchCard}>
                 <Text style={styles.matchTitle}>{match.teamAName} vs {match.teamBName}</Text>
                 <Text style={styles.meta}>
+                  {match.groupId ? `${pools.find(p => p.id === match.groupId)?.name || 'Pool'} · ` : ''}
                   {match.status} · {new Date(match.dateTime).toLocaleString()}
                 </Text>
                 <Text style={styles.meta}>{match.venue} · {match.overs} ov</Text>
@@ -681,14 +910,32 @@ export default function AdminTournamentDetailScreen({ route, navigation }: any) 
         )}
 
         {currentTab === 'table' && (
-          <PremiumPointsTable
-            entries={tableEntries}
-            title={tournament.name}
-            subtitle={`${tournament.format} · ${enrolledIds.length || tableEntries.length} teams · Friendlies excluded`}
-            emptyText="Enroll teams to see standings."
-            onShare={() => shareText('Points table', pointsTableShareMessage(tournament, tableEntries))}
-            onPressTeam={teamId => navigation.navigate('TeamProfile', { teamId })}
-          />
+          hasPools ? (
+            <>
+              {poolTables.map(({ group, entries }) => (
+                <View key={group.id} style={{ marginBottom: Spacing.base }}>
+                  <PremiumPointsTable
+                    entries={entries}
+                    title={group.name}
+                    subtitle={`${tournament.name} · ${group.teamIds.length} teams`}
+                    emptyText="Add teams to this pool to see standings."
+                    qualifyCount={2}
+                    onShare={() => shareText(`${group.name} table`, pointsTableShareMessage(tournament, entries))}
+                    onPressTeam={teamId => navigation.navigate('TeamProfile', { teamId })}
+                  />
+                </View>
+              ))}
+            </>
+          ) : (
+            <PremiumPointsTable
+              entries={tableEntries}
+              title={tournament.name}
+              subtitle={`${tournament.format} · ${enrolledIds.length || tableEntries.length} teams · Friendlies excluded`}
+              emptyText="Enroll teams to see standings."
+              onShare={() => shareText('Points table', pointsTableShareMessage(tournament, tableEntries))}
+              onPressTeam={teamId => navigation.navigate('TeamProfile', { teamId })}
+            />
+          )
         )}
       </ScrollView>
 
@@ -818,4 +1065,13 @@ const styles = StyleSheet.create({
   },
   hubActionLabel: { color: Colors.textPrimary, fontWeight: '800', fontSize: Typography.sm },
   hubActionHint: { color: Colors.textMuted, fontSize: 11, marginTop: 2, fontWeight: '700' },
+  poolChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: Spacing.sm },
+  poolActions: { flexDirection: 'row', marginBottom: Spacing.sm },
+  poolTitleInput: {
+    color: Colors.textPrimary,
+    fontWeight: '800',
+    fontSize: Typography.lg,
+    paddingVertical: 4,
+    marginBottom: 4,
+  },
 });
