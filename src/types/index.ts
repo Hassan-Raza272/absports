@@ -132,6 +132,8 @@ export interface Match {
   createdBy?: string;
   /** Absent or empty = friendly / standalone match (not part of a tournament). */
   tournamentId?: string;
+  /** Pool / group this league-stage match belongs to. */
+  groupId?: string;
   matchNumber: number;
   teamA: string; // teamId
   teamB: string;

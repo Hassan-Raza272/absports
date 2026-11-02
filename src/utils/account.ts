@@ -1,4 +1,4 @@
-import { Club, Match, Team, User } from '../types';
+import { Club, Match, Team, Tournament, User } from '../types';
 
 export function startOfLocalDay(value: number | Date): number {
   const d = new Date(value);
@@ -118,6 +118,33 @@ export function isUsersOwnTeam(
     return (
       (user.clubIds || []).includes(team.clubId) ||
       (!!user.currentClubId && user.currentClubId === team.clubId)
+    );
+  }
+  return false;
+}
+
+/** Tournament belongs to this user (created by user, or legacy club competition where user is staff if createdBy is missing). */
+export function isUsersOwnTournament(
+  user: User | null | undefined,
+  tournament: Tournament | null | undefined,
+  clubs: Club[] = [],
+): boolean {
+  if (!user || !tournament) return false;
+  if (tournament.createdBy) return tournament.createdBy === user.id;
+  if (tournament.clubId) {
+    const club = clubs.find(c => c.id === tournament.clubId);
+    if (club) {
+      const email = user.email?.toLowerCase();
+      return (
+        club.ownerId === user.id ||
+        (club.adminIds || []).includes(user.id) ||
+        (!!email && (club.adminEmails || []).includes(email)) ||
+        (user.clubIds || []).includes(club.id)
+      );
+    }
+    return (
+      (user.clubIds || []).includes(tournament.clubId) ||
+      (!!user.currentClubId && user.currentClubId === tournament.clubId)
     );
   }
   return false;

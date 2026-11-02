@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { Colors, Radius, Spacing, Typography } from '../../theme';
@@ -12,8 +12,9 @@ import {
   useMatchesStore,
   useScopeStore,
   useTournamentsStore,
-  useUserClubs,
 } from '../../store';
+import { listenUserTournaments } from '../../firebase';
+import { isUsersOwnTournament } from '../../utils/account';
 import { Tournament } from '../../types';
 
 function uniqueById<T extends { id: string }>(rows: T[]): T[] {
@@ -33,34 +34,44 @@ const STATUS_COLOR: Record<string, string> = {
 
 export default function MyTournamentsScreen({ navigation }: any) {
   const user = useAuthStore(s => s.user);
-  const myClubs = useUserClubs();
   const clubs = useClubsStore(s => s.clubs);
-  const selectedClubId = useScopeStore(s => s.selectedClubId);
   const selectClub = useScopeStore(s => s.selectClub);
   const localTournaments = useTournamentsStore(s => s.tournaments);
   const hubTournaments = useHubStore(s => s.tournaments);
   const hubReady = useHubStore(s => s.ready);
   const tournamentsReady = useTournamentsStore(s => s.ready);
   const matches = useMatchesStore(s => s.matches);
+  const [userTournaments, setUserTournaments] = useState<Tournament[]>([]);
+  const [userTournamentsReady, setUserTournamentsReady] = useState(false);
 
-  const clubIds = useMemo(() => {
-    const ids = new Set(myClubs.map(c => c.id));
-    if (selectedClubId) ids.add(selectedClubId);
-    if (user?.currentClubId) ids.add(user.currentClubId);
-    (user?.clubIds || []).forEach(id => ids.add(id));
-    return ids;
-  }, [myClubs, selectedClubId, user?.currentClubId, user?.clubIds]);
+  useEffect(() => {
+    if (!user?.id) {
+      setUserTournaments([]);
+      setUserTournamentsReady(true);
+      return;
+    }
+    setUserTournamentsReady(false);
+    const unsub = listenUserTournaments(user.id, rows => {
+      setUserTournaments(rows);
+      setUserTournamentsReady(true);
+    });
+    return () => {
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [user?.id]);
 
   const mine = useMemo(() => {
-    const merged = uniqueById([...localTournaments, ...hubTournaments]);
-    const scoped = clubIds.size ? merged.filter(t => clubIds.has(t.clubId)) : merged;
-    return scoped.sort((a, b) => {
-      const rank = (s: string) => (s === 'ONGOING' ? 0 : s === 'UPCOMING' ? 1 : 2);
-      const byStatus = rank(a.status) - rank(b.status);
-      if (byStatus !== 0) return byStatus;
-      return (b.year || 0) - (a.year || 0) || a.name.localeCompare(b.name);
-    });
-  }, [localTournaments, hubTournaments, clubIds]);
+    if (!user) return [];
+    const merged = uniqueById([...userTournaments, ...localTournaments, ...hubTournaments]);
+    return merged
+      .filter(t => isUsersOwnTournament(user, t, clubs))
+      .sort((a, b) => {
+        const rank = (s: string) => (s === 'ONGOING' ? 0 : s === 'UPCOMING' ? 1 : 2);
+        const byStatus = rank(a.status) - rank(b.status);
+        if (byStatus !== 0) return byStatus;
+        return (b.year || 0) - (a.year || 0) || a.name.localeCompare(b.name);
+      });
+  }, [user, userTournaments, localTournaments, hubTournaments, clubs]);
 
   function openTournament(tournament: Tournament) {
     selectClub(tournament.clubId, tournament.id);
@@ -84,7 +95,7 @@ export default function MyTournamentsScreen({ navigation }: any) {
     );
   }
 
-  if (!hubReady && !tournamentsReady) {
+  if (!hubReady && !tournamentsReady && !userTournamentsReady) {
     return (
       <ScreenScaffold title="My Tournaments" showScope={false}>
         <SkeletonEntityList count={5} />
