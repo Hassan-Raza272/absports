@@ -26,15 +26,22 @@ export default function PointsTableScreen({ navigation }: any) {
   const tournamentDoc = useTournamentsStore(s => s.tournament);
   const clubId = useScopeStore(s => s.selectedClubId);
   const club = useClubsStore(s => s.clubs.find(c => c.id === clubId));
+  const activeTournament = tournamentDoc || tournament;
+  const groups = activeTournament?.groups?.filter(g => (g.teamIds || []).length) || [];
   const entries = buildPointsTable(teams, matches, {
-    pointsConfig: tournamentDoc?.pointsConfig || tournament?.pointsConfig,
-    overrides: tournamentDoc?.pointsOverrides || tournament?.pointsOverrides,
-    enrolledTeamIds: tournamentDoc?.teamIds?.length
-      ? tournamentDoc.teamIds
-      : tournament?.teamIds?.length
-        ? tournament.teamIds
-        : undefined,
+    pointsConfig: activeTournament?.pointsConfig,
+    overrides: activeTournament?.pointsOverrides,
+    enrolledTeamIds: activeTournament?.teamIds?.length ? activeTournament.teamIds : undefined,
   });
+  const poolTables = groups.map(group => ({
+    group,
+    entries: buildPointsTable(teams, matches.filter(m => !m.groupId || m.groupId === group.id), {
+      pointsConfig: activeTournament?.pointsConfig,
+      overrides: activeTournament?.pointsOverrides,
+      enrolledTeamIds: group.teamIds,
+      groupTeamIds: group.teamIds,
+    }),
+  }));
 
   if (!teamsReady || !matchesReady) {
     return (
@@ -55,7 +62,26 @@ export default function PointsTableScreen({ navigation }: any) {
         </View>
       }>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        {entries.length === 0 ? (
+        {poolTables.length > 0 ? (
+          poolTables.map(({ group, entries: poolEntries }) => (
+            <View key={group.id} style={{ marginBottom: Spacing.base }}>
+              <PremiumPointsTable
+                entries={poolEntries}
+                title={group.name}
+                subtitle={`${tournamentName} · ${clubName || club?.name || 'AB Sports'}`}
+                qualifyCount={2}
+                onShare={() =>
+                  shareText(
+                    `${group.name} table`,
+                    pointsTableImageStyleMessage(activeTournament, poolEntries, clubName || club?.name)
+                      || pointsTableShareMessage(activeTournament, poolEntries, clubName || club?.name),
+                  )
+                }
+                onPressTeam={teamId => navigation.navigate('TeamProfile', { teamId })}
+              />
+            </View>
+          ))
+        ) : entries.length === 0 ? (
           <EmptyState
             title="No league table yet"
             subtitle="Select a tournament and complete official matches. Friendlies stay off this table."
@@ -70,8 +96,8 @@ export default function PointsTableScreen({ navigation }: any) {
             onShare={() =>
               shareText(
                 'Points table',
-                pointsTableImageStyleMessage(tournamentDoc || tournament, entries, clubName || club?.name)
-                  || pointsTableShareMessage(tournamentDoc || tournament, entries, clubName || club?.name),
+                pointsTableImageStyleMessage(activeTournament, entries, clubName || club?.name)
+                  || pointsTableShareMessage(activeTournament, entries, clubName || club?.name),
               )
             }
             onPressTeam={teamId => navigation.navigate('TeamProfile', { teamId })}

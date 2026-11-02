@@ -32,13 +32,37 @@ import {
   matchKindToFormat,
   toYmd,
 } from '../../../constants/tournamentSetup';
-import { BallType, PitchType, Team, TournamentCategory, TournamentMatchKind } from '../../../types';
-import { useAuthStore, useScopeStore, useTeamsStore, useTournamentsStore } from '../../../store';
-import { createTournament, uploadImage } from '../../../firebase';
+import { BallType, PitchType, Team, TournamentCategory, TournamentGroup, TournamentMatchKind, TournamentType } from '../../../types';
+import { useAuthStore, useHubStore, useScopeStore, useTeamsStore, useTournamentsStore } from '../../../store';
+import { addTeam as addRemoteTeam, createTournament, uploadImage } from '../../../firebase';
 import { isLocalImageUri } from '../../../services/cloudinary';
 import { DEFAULT_CLUB_ID } from '../../../constants/scope';
+import { randomPremiumTeamLogo } from '../../../utils/defaultLogo';
+import {
+  MAX_POOLS,
+  MIN_POOLS,
+  assignTeamToPool,
+  balanceTeamsIntoPools,
+  makeDefaultPools,
+  makePoolId,
+  placeTeamInPool,
+  poolForTeam,
+  poolLabel,
+  removeTeamFromPools,
+  teamIdsFromPools,
+} from '../../../utils/tournamentPools';
 
-type Step = 1 | 2;
+type Step = 1 | 2 | 3;
+type CompFormat = 'league' | 'groups' | 'knockout';
+
+function uniqueById<T extends { id: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  return rows.filter(row => {
+    if (!row?.id || seen.has(row.id)) return false;
+    seen.add(row.id);
+    return true;
+  });
+}
 
 export default function CreateTournamentScreen({ navigation }: any) {
   const user = useAuthStore(s => s.user);
@@ -76,6 +100,21 @@ export default function CreateTournamentScreen({ navigation }: any) {
   const [homeAway, setHomeAway] = useState(false);
   const [needsMoreTeams, setNeedsMoreTeams] = useState(false);
   const [needsOfficials, setNeedsOfficials] = useState(false);
+  const [compFormat, setCompFormat] = useState<CompFormat>('league');
+  const [poolCount, setPoolCount] = useState(2);
+  const [pools, setPools] = useState<TournamentGroup[]>(() => makeDefaultPools(2));
+  const [selectedPoolId, setSelectedPoolId] = useState('');
+  const [newTeamName, setNewTeamName] = useState('');
+  const [newTeamShort, setNewTeamShort] = useState('');
+  const [addingTeam, setAddingTeam] = useState(false);
+
+  const addTeamLocal = useTeamsStore(s => s.addTeam);
+  const localTeams = useTeamsStore(s => s.teams);
+  const hubTeams = useHubStore(s => s.teams);
+  const clubTeams = uniqueById<Team>([...localTeams, ...hubTeams]).filter(
+    t => t.clubId === createClubId || (!!user?.id && t.createdBy === user.id),
+  );
+  const unassignedTeams = clubTeams.filter(team => !poolForTeam(pools, team.id));
 
   function pickImage(onUri: (uri: string) => void) {
     launchImageLibrary({ mediaType: 'photo', quality: 0.8 }, response => {
@@ -130,22 +169,145 @@ export default function CreateTournamentScreen({ navigation }: any) {
     setStep(2);
   }
 
-  async function handleCreate() {
+  function setupValid(): boolean {
     if (!category) {
       showAlert('Category required', 'Choose a tournament category.');
-      return;
+      return false;
     }
     if (!ballType) {
       showAlert('Ball type required', 'Select tennis, leather, or other.');
-      return;
+      return false;
     }
     if (!matchKind) {
       showAlert('Match type required', 'Select how this competition is played.');
-      return;
+      return false;
     }
     if (endDate < startDate) {
       showAlert('Invalid dates', 'End date must be on or after the start date.');
+      return false;
+    }
+    return true;
+  }
+
+  function goPoolsOrCreate() {
+    if (!setupValid()) return;
+    if (compFormat === 'groups') {
+      const next = makeDefaultPools(poolCount, pools);
+      setPools(next);
+      setSelectedPoolId(next[0]?.id || '');
+      setStep(3);
       return;
+    }
+    handleCreate();
+  }
+
+  function setPoolTotal(n: number) {
+    setPoolCount(n);
+    setPools(prev => {
+      const next = makeDefaultPools(n, prev);
+      if (!next.some(p => p.id === selectedPoolId)) setSelectedPoolId(next[0]?.id || '');
+      return next;
+    });
+  }
+
+  function addPool() {
+    if (pools.length >= MAX_POOLS) {
+      showAlert('Pool limit', `You can create up to ${MAX_POOLS} pools.`);
+      return;
+    }
+    const next = [...pools, { id: makePoolId(), name: poolLabel(pools.length), teamIds: [] }];
+    setPoolCount(next.length);
+    setPools(next);
+    setSelectedPoolId(next[next.length - 1].id);
+  }
+
+  function removePool(id: string) {
+    if (pools.length <= MIN_POOLS) {
+      showAlert('Keep two pools', 'A group-stage tournament needs at least two pools.');
+      return;
+    }
+    const next = pools.filter(p => p.id !== id);
+    setPoolCount(next.length);
+    setPools(next);
+    if (selectedPoolId === id) setSelectedPoolId(next[0]?.id || '');
+  }
+
+  function renamePool(id: string, name: string) {
+    setPools(prev => prev.map(p => (p.id === id ? { ...p, name } : p)));
+  }
+
+  function toggleTeamInPool(poolId: string, teamId: string) {
+    setPools(prev => assignTeamToPool(prev, poolId, teamId));
+  }
+
+  function moveTeamToPool(poolId: string, teamId: string) {
+    setPools(prev => placeTeamInPool(prev, poolId, teamId));
+  }
+
+  function unassignTeam(teamId: string) {
+    setPools(prev => removeTeamFromPools(prev, teamId));
+  }
+
+  function autoBalance() {
+    const assigned = teamIdsFromPools(pools);
+    const source = assigned.length ? assigned : clubTeams.map(t => t.id);
+    if (source.length < 2) {
+      showAlert('Need squads', 'Add at least two teams, then auto-balance them across pools.');
+      return;
+    }
+    setPools(prev => balanceTeamsIntoPools(prev, source));
+  }
+
+  async function createTeamIntoPool() {
+    if (!newTeamName.trim() || !newTeamShort.trim()) {
+      showAlert('Required', 'Enter a team name and short name.');
+      return;
+    }
+    const targetPool = selectedPoolId || pools[0]?.id;
+    if (!targetPool) {
+      showAlert('Pick a pool', 'Select which pool this team should join.');
+      return;
+    }
+    setAddingTeam(true);
+    try {
+      const shortName = newTeamShort.trim().toUpperCase();
+      const payload: Omit<Team, 'id'> = {
+        clubId: createClubId,
+        createdBy: user?.id,
+        name: newTeamName.trim(),
+        shortName,
+        captain: 'TBD',
+        viceCaptain: 'TBD',
+        coach: 'TBD',
+        owner: 'TBD',
+        homeGround: ground.trim() || 'Club Ground',
+        logoURL: randomPremiumTeamLogo(`${newTeamName.trim()}-${shortName}`),
+        primaryColor: Colors.primary,
+        secondaryColor: Colors.primaryDark,
+        playerIds: [],
+        stats: { played: 0, won: 0, lost: 0, nr: 0, nrr: 0, points: 0 },
+      };
+      const ref = await addRemoteTeam(payload);
+      const team = { ...payload, id: String(ref.id) };
+      addTeamLocal(team);
+      setPools(prev => placeTeamInPool(prev, targetPool, team.id));
+      setNewTeamName('');
+      setNewTeamShort('');
+    } catch (error: any) {
+      showAlert('Could not add team', error?.message || 'Try again.');
+    } finally {
+      setAddingTeam(false);
+    }
+  }
+
+  async function handleCreate() {
+    if (step === 2 && !setupValid()) return;
+    if (compFormat === 'groups') {
+      const named = pools.filter(p => p.name.trim());
+      if (named.length < MIN_POOLS) {
+        showAlert('Pools required', `Create at least ${MIN_POOLS} named pools.`);
+        return;
+      }
     }
 
     setSaving(true);
@@ -162,10 +324,16 @@ export default function CreateTournamentScreen({ navigation }: any) {
       } else if (bannerUri) {
         bannerURL = bannerUri;
       }
-      const allTeams = useTeamsStore.getState().teams;
-      const clubTeamIds = allTeams.filter((t: Team) => t.clubId === createClubId).map((t: Team) => t.id);
       const scoring = matchKindToFormat(matchKind);
       const year = startDate.getFullYear();
+      const usePools = compFormat === 'groups';
+      const savedPools = usePools
+        ? pools
+            .filter(p => p.name.trim())
+            .map(p => ({ id: p.id, name: p.name.trim(), teamIds: p.teamIds || [] }))
+        : [];
+      const teamIds = usePools ? teamIdsFromPools(savedPools) : [];
+      const type: TournamentType = compFormat === 'knockout' ? 'knockout' : usePools ? 'hybrid' : 'league';
       const payload = {
         clubId: createClubId,
         createdBy: user?.id,
@@ -191,14 +359,14 @@ export default function CreateTournamentScreen({ navigation }: any) {
         venue: ground.trim(),
         status: 'UPCOMING' as const,
         format: scoring.format,
-        type: 'league' as const,
-        totalTeams: clubTeamIds.length,
+        type,
+        totalTeams: teamIds.length,
         totalMatches: 0,
         overs: scoring.overs,
         ballsPerOver: scoring.ballsPerOver,
         wicketsPerInnings: 10,
-        teamIds: clubTeamIds,
-        groups: [] as [],
+        teamIds,
+        groups: savedPools,
         pointsConfig: { win: 2, tie: 1, nr: 1 },
       };
       const ref = await createTournament(payload);
@@ -217,15 +385,17 @@ export default function CreateTournamentScreen({ navigation }: any) {
       <StatusBar barStyle="light-content" backgroundColor={Colors.primary} />
       <LinearGradient colors={Colors.gradHeader} style={styles.header}>
         <BackButton
-          onPress={() => (step === 2 ? setStep(1) : navigation.goBack())}
+          onPress={() => (step === 1 ? navigation.goBack() : setStep(s => (s === 3 ? 2 : 1)))}
           iconOnly
           size={20}
           style={styles.headerBtn}
         />
         <Text style={styles.headerTitle} numberOfLines={1}>
-          {step === 1 ? 'Create tournament' : 'Tournament setup'}
+          {step === 1 ? 'Create tournament' : step === 2 ? 'Tournament setup' : 'Pools'}
         </Text>
-        <Text style={styles.stepMark}>{step}/2</Text>
+        <Text style={styles.stepMark}>
+          {step}/{compFormat === 'groups' ? 3 : 2}
+        </Text>
       </LinearGradient>
 
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
@@ -264,7 +434,7 @@ export default function CreateTournamentScreen({ navigation }: any) {
             <Field label="Organiser number *" value={organiserPhone} onChange={v => setOrganiserPhone(v.replace(/\D/g, '').slice(0, 11))} keyboardType="phone-pad" maxLength={11} />
             <Field label="Organiser email" value={organiserEmail} onChange={setOrganiserEmail} keyboardType="email-address" />
           </>
-        ) : (
+        ) : step === 2 ? (
           <>
             <Text style={styles.section}>Tournament dates</Text>
             <View style={styles.dateRow}>
@@ -321,9 +491,179 @@ export default function CreateTournamentScreen({ navigation }: any) {
               ))}
             </View>
 
+            <Text style={styles.section}>Competition structure *</Text>
+            <FormatCard
+              title="League"
+              hint="Every team in one table"
+              active={compFormat === 'league'}
+              onPress={() => setCompFormat('league')}
+            />
+            <FormatCard
+              title="Pools / groups"
+              hint="Split squads into Pool A, B, C… then play inside each pool"
+              active={compFormat === 'groups'}
+              onPress={() => setCompFormat('groups')}
+            />
+            <FormatCard
+              title="Knockout"
+              hint="Single-elimination bracket"
+              active={compFormat === 'knockout'}
+              onPress={() => setCompFormat('knockout')}
+            />
+            {compFormat === 'groups' && (
+              <Text style={styles.helper}>
+                Next step: create named pools and place each team in one group, like a professional group stage.
+              </Text>
+            )}
+
             <CheckRow label="Enable home / away format" value={homeAway} onToggle={() => setHomeAway(v => !v)} />
             <CheckRow label="Need more teams for this tournament?" value={needsMoreTeams} onToggle={() => setNeedsMoreTeams(v => !v)} />
             <CheckRow label="Need officials? (umpire, scorer)" value={needsOfficials} onToggle={() => setNeedsOfficials(v => !v)} />
+          </>
+        ) : (
+          <>
+            <Text style={styles.helper}>
+              Name each pool, then add squads. A team can sit in only one pool. Group-stage fixtures stay inside that pool.
+            </Text>
+            <Text style={styles.section}>Number of pools</Text>
+            <View style={styles.chipWrap}>
+              {Array.from({ length: MAX_POOLS - MIN_POOLS + 1 }, (_, i) => MIN_POOLS + i).map(n => (
+                <Chip key={n} label={String(n)} active={poolCount === n} onPress={() => setPoolTotal(n)} />
+              ))}
+            </View>
+            <View style={styles.poolActionRow}>
+              <TouchableOpacity onPress={addPool} style={styles.poolActionBtn}>
+                <Text style={styles.poolActionText}>+ Add pool</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={autoBalance} style={styles.poolActionBtn}>
+                <Text style={styles.poolActionText}>Auto-balance</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.poolCard}>
+              <Text style={styles.poolKicker}>Create a team into a pool</Text>
+              <View style={styles.chipWrap}>
+                {pools.map(pool => (
+                  <Chip
+                    key={pool.id}
+                    label={pool.name || 'Pool'}
+                    active={selectedPoolId === pool.id}
+                    onPress={() => setSelectedPoolId(pool.id)}
+                  />
+                ))}
+              </View>
+              <TextInput
+                style={styles.poolName}
+                value={newTeamName}
+                onChangeText={setNewTeamName}
+                placeholder="Team name *"
+                placeholderTextColor={Colors.textMuted}
+              />
+              <TextInput
+                style={styles.poolName}
+                value={newTeamShort}
+                onChangeText={setNewTeamShort}
+                placeholder="Short name * (e.g. LIO)"
+                placeholderTextColor={Colors.textMuted}
+                autoCapitalize="characters"
+              />
+              <TouchableOpacity
+                onPress={createTeamIntoPool}
+                disabled={addingTeam}
+                style={styles.inlineAddBtn}
+                activeOpacity={0.85}>
+                {addingTeam ? (
+                  <ActivityIndicator color={Colors.onPrimary} />
+                ) : (
+                  <Text style={styles.inlineAddText}>
+                    Add to {pools.find(p => p.id === selectedPoolId)?.name || 'selected pool'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+
+            {unassignedTeams.length > 0 && (
+              <View style={styles.poolCard}>
+                <Text style={styles.poolKicker}>Unassigned squads</Text>
+                <Text style={styles.helper}>Tap a pool name to place a team. Each squad can only be in one pool.</Text>
+                {unassignedTeams.map(team => (
+                  <View key={team.id} style={styles.teamRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.teamRowName}>{team.name}</Text>
+                      <Text style={styles.teamRowMeta}>{team.shortName}</Text>
+                    </View>
+                    <View style={styles.chipWrap}>
+                      {pools.map(pool => (
+                        <TouchableOpacity key={pool.id} onPress={() => moveTeamToPool(pool.id, team.id)} style={styles.teamChip}>
+                          <Text style={styles.teamChipText}>{pool.name}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {pools.map((pool, index) => {
+              const poolTeams = clubTeams.filter(team => pool.teamIds.includes(team.id));
+              const candidates = clubTeams.filter(team => !pool.teamIds.includes(team.id));
+              return (
+                <View key={pool.id} style={styles.poolCard}>
+                  <View style={styles.poolHeader}>
+                    <Text style={styles.poolKicker}>Pool {index + 1}</Text>
+                    {pools.length > MIN_POOLS && (
+                      <TouchableOpacity onPress={() => removePool(pool.id)}>
+                        <Text style={styles.deletePool}>Remove</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  <TextInput
+                    style={styles.poolName}
+                    value={pool.name}
+                    onChangeText={v => renamePool(pool.id, v)}
+                    placeholder={poolLabel(index)}
+                    placeholderTextColor={Colors.textMuted}
+                  />
+                  <Text style={styles.poolMeta}>
+                    {pool.teamIds.length} team{pool.teamIds.length === 1 ? '' : 's'} in this pool
+                  </Text>
+                  {poolTeams.map(team => (
+                    <View key={team.id} style={styles.teamRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.teamRowName}>{team.name}</Text>
+                        <Text style={styles.teamRowMeta}>{team.shortName}</Text>
+                      </View>
+                      <TouchableOpacity onPress={() => unassignTeam(team.id)}>
+                        <Text style={styles.deletePool}>Remove</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                  {poolTeams.length === 0 && (
+                    <Text style={styles.helper}>No teams in this pool yet.</Text>
+                  )}
+                  {candidates.length > 0 && (
+                    <>
+                      <Text style={styles.poolMeta}>Add or move a squad</Text>
+                      <View style={styles.chipWrap}>
+                        {candidates.map((team: Team) => {
+                          const other = poolForTeam(pools, team.id);
+                          return (
+                            <TouchableOpacity
+                              key={team.id}
+                              onPress={() => (other ? moveTeamToPool(pool.id, team.id) : toggleTeamInPool(pool.id, team.id))}
+                              style={styles.teamChip}>
+                              <Text style={styles.teamChipText}>
+                                {other ? `Move ${team.shortName || team.name}` : `+ ${team.shortName || team.name}`}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </>
+                  )}
+                </View>
+              );
+            })}
           </>
         )}
       </ScrollView>
@@ -331,13 +671,15 @@ export default function CreateTournamentScreen({ navigation }: any) {
       <View style={styles.footer}>
         <TouchableOpacity
           style={styles.nextBtn}
-          onPress={step === 1 ? goNext : handleCreate}
+          onPress={step === 1 ? goNext : step === 2 ? goPoolsOrCreate : handleCreate}
           disabled={saving}
           activeOpacity={0.9}>
           {saving ? (
             <ActivityIndicator color={Colors.onPrimary} />
           ) : (
-            <Text style={styles.nextText}>{step === 1 ? 'Next' : 'Create tournament'}</Text>
+            <Text style={styles.nextText}>
+              {step === 1 ? 'Next' : step === 2 && compFormat === 'groups' ? 'Next: set pools' : 'Create tournament'}
+            </Text>
           )}
         </TouchableOpacity>
       </View>
@@ -455,6 +797,28 @@ function Chip({ label, active, onPress }: { label: string; active: boolean; onPr
   return (
     <TouchableOpacity onPress={onPress} style={[styles.chip, active && styles.chipOn]}>
       <Text style={[styles.chipText, active && styles.chipTextOn]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function FormatCard({
+  title,
+  hint,
+  active,
+  onPress,
+}: {
+  title: string;
+  hint: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <TouchableOpacity onPress={onPress} style={[styles.formatCard, active && styles.formatCardOn]} activeOpacity={0.88}>
+      <View style={[styles.formatDot, active && styles.formatDotOn]} />
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.formatTitle, active && styles.formatTitleOn]}>{title}</Text>
+        <Text style={styles.formatHint}>{hint}</Text>
+      </View>
     </TouchableOpacity>
   );
 }
@@ -595,6 +959,97 @@ const styles = StyleSheet.create({
   },
   boxOn: { backgroundColor: Colors.accent, borderColor: Colors.accent },
   checkLabel: { flex: 1, color: Colors.textPrimary, fontWeight: '600' },
+  helper: { color: Colors.textSecondary, fontSize: Typography.sm, fontWeight: '600', marginTop: 4, marginBottom: Spacing.sm, lineHeight: 20 },
+  formatCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    padding: Spacing.base,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.bgElevated,
+    marginBottom: Spacing.sm,
+  },
+  formatCardOn: {
+    borderColor: Colors.primary,
+    backgroundColor: Colors.primary + '10',
+  },
+  formatDot: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: Colors.border,
+    backgroundColor: Colors.bgCard,
+  },
+  formatDotOn: {
+    borderColor: Colors.primary,
+    backgroundColor: Colors.primary,
+  },
+  formatTitle: { color: Colors.textPrimary, fontWeight: '800', fontSize: Typography.md },
+  formatTitleOn: { color: Colors.primary },
+  formatHint: { color: Colors.textSecondary, fontSize: Typography.xs, fontWeight: '600', marginTop: 2, lineHeight: 16 },
+  poolActionRow: { flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.sm },
+  poolActionBtn: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: Colors.primary + '55',
+    backgroundColor: Colors.primary + '10',
+  },
+  poolActionText: { color: Colors.primary, fontWeight: '800', fontSize: Typography.sm },
+  poolHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  deletePool: { color: Colors.loss, fontWeight: '800', fontSize: Typography.xs },
+  inlineAddBtn: {
+    marginTop: Spacing.md,
+    height: 44,
+    borderRadius: Radius.md,
+    backgroundColor: Colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inlineAddText: { color: Colors.onPrimary, fontWeight: '800' },
+  teamRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+  },
+  teamRowName: { color: Colors.textPrimary, fontWeight: '800' },
+  teamRowMeta: { color: Colors.textMuted, fontSize: Typography.xs, fontWeight: '700', marginTop: 2 },
+  poolCard: {
+    backgroundColor: Colors.bgElevated,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: Radius.lg,
+    padding: Spacing.base,
+    marginTop: Spacing.md,
+  },
+  poolKicker: { color: Colors.primary, fontSize: 11, fontWeight: '900', letterSpacing: 0.6 },
+  poolName: {
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    color: Colors.textPrimary,
+    fontWeight: '800',
+    fontSize: Typography.lg,
+    paddingVertical: 8,
+  },
+  poolMeta: { color: Colors.textMuted, fontSize: Typography.xs, fontWeight: '700', marginTop: 6, marginBottom: Spacing.sm },
+  teamChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.bgCard,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  teamChipOn: { backgroundColor: Colors.primary + '14', borderColor: Colors.primary },
+  teamChipText: { color: Colors.textSecondary, fontWeight: '800', fontSize: 11 },
+  teamChipTextOn: { color: Colors.primary },
   footer: {
     padding: Spacing.base,
     paddingBottom: 28,
